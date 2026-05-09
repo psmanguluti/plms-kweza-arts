@@ -251,3 +251,46 @@
 {% endif %}
 
 {% endblock %}
+
+{% block extra_js %}
+<script>
+/*
+  Live version polling.
+  Every 4 seconds, ask the server if a new version has been captured.
+  If the version count has changed, show a toast and reload the page.
+*/
+(function () {
+  const PROJECT_ID   = {{ project.id }};
+  const KNOWN_COUNT  = {{ project.version_count }};
+  const API_URL      = `/api/project/${PROJECT_ID}/latest`;
+  let   reloading    = false;
+
+  function poll() {
+    if (reloading) return;
+
+    fetch(API_URL)
+      .then(r => r.json())
+      .then(data => {
+        if (data.version_count > KNOWN_COUNT) {
+          reloading = true;
+
+          // Show toast before reload
+          showToast(
+            `New version captured — v${data.latest_version} (score: ${data.latest_score})`,
+            'success'
+          );
+
+          // Reload after 1.8 s so the toast is visible
+          setTimeout(() => location.reload(), 1800);
+        }
+      })
+      .catch(() => {
+        // Silently ignore network errors (server may be restarting)
+      });
+  }
+
+  // Start polling every 4 seconds
+  setInterval(poll, 4000);
+})();
+</script>
+{% endblock %}

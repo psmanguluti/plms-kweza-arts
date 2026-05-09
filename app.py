@@ -246,5 +246,25 @@ def settings():
     db_size = os.path.getsize('plms.db')//1024 if os.path.exists('plms.db') else 0
     return render_template('settings.html', s=s, watcher_active=is_watching(), db_size=db_size)
 
+# ── Paste this block into app.py just before the last two lines ──
+# (before:  if __name__ == '__main__':  )
+
+@app.route('/api/project/<int:project_id>/latest')
+@login_required
+def api_latest(project_id):
+    """
+    Lightweight poll endpoint.
+    Returns the latest version number and score so the browser
+    can detect when a new version has been captured.
+    """
+    proj = Project.query.filter_by(id=project_id,
+                                   user_id=current_user.id).first_or_404()
+    lv   = proj.latest_version
+    return jsonify({
+        'version_count': proj.version_count,
+        'latest_version': lv.version_num   if lv else 0,
+        'latest_score':   lv.quality_score if lv else 0,
+    })
+
 if __name__ == '__main__':
     app.run(debug=True, use_reloader=False, port=5000)
