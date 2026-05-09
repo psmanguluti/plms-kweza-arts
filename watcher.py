@@ -1,103 +1,118 @@
 """
-watcher.py — Reliable FL Studio file watcher with detailed logging.
+watcher.py — Reliable FL Studio file watcher.
 
-FL Studio on Windows uses atomic saves:
-  1. Writes to a temp file  (triggers on_created)
-  2. Renames temp → final   (triggers on_moved)
-  3. Sometimes also fires on_modified
-
-We listen to ALL three events so nothing is missed.
+Why PollingObserver?
+  FL Studio on Windows uses atomic saves (write temp -> rename to .flp).
+  The default WindowsApiObserver misses rename events and dies silently.
+  PollingObserver checks file modification times on a fixed interval —
+  slower but 100% reliable across all Windows versions and save patterns.
 """
 import os, time, threading, logging
-from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 
-# Configure logging for the watcher module
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
+logging.basicConfig(level=logging.INFO,
+                    format='[%(asctime)s] %(levelname)s: %(message)s')
+
+# Module-level state
+_observer     = None
+_capture_fn   = None
+_watch_folder = None
+_lock         = threading.Lock()
 
 
 class FLPHandler(FileSystemEventHandler):
     def __init__(self, capture_fn):
         self.capture_fn = capture_fn
-        self._last: dict[str, float] = {}
-        self._lock = threading.Lock()
-        logging.info("FLPHandler initialized")
+        self._last = {}
+        self._dlock = threading.Lock()
 
-    # ── internal debounce ──────────────────────────────────────
-    def _should_fire(self, path: str) -> bool:
+    def _debounce(self, path):
         now = time.time()
-        with self._lock:
-            if now - self._last.get(path, 0) < 2.5:
-                logging.debug(f"Debounced {path} (too soon)")
+        with self._dlock:
+            if now - self._last.get(path, 0) < 3.0:
                 return False
             self._last[path] = now
             return True
 
-    def _handle(self, path: str):
+    def _handle(self, path):
         if not path.lower().endswith('.flp'):
-            logging.debug(f"Ignored non‑FLP file: {path}")
             return
-        logging.info(f"FLP event detected: {path}")
-        # Small delay so FL Studio finishes writing before we read
-        time.sleep(0.4)
-        if self._should_fire(path):
-            logging.info(f"Calling capture function for {path}")
-            try:
-                self.capture_fn(path)
-                logging.info(f"Capture completed for {path}")
-            except Exception as e:
-                logging.error(f"Error in capture function: {e}", exc_info=True)
+        time.sleep(0.6)          # let FL Studio finish writing
+        if not self._debounce(path):
+            return
+        logging.info(f'[Watcher] FLP change detected: {path}')
+        try:
+            self.capture_fn(path)
+        except Exception as e:
+            logging.error(f'[Watcher] Capture error: {e}', exc_info=True)
 
-    # ── watchdog events ────────────────────────────────────────
     def on_modified(self, event):
         if not event.is_directory:
-            logging.debug(f"on_modified: {event.src_path}")
             self._handle(event.src_path)
 
     def on_created(self, event):
-        """Catches FL Studio writing the initial temp file."""
         if not event.is_directory:
-            logging.debug(f"on_created: {event.src_path}")
             self._handle(event.src_path)
 
     def on_moved(self, event):
-        """Catches FL Studio renaming temp → final .flp (atomic save)."""
         if not event.is_directory:
-            logging.debug(f"on_moved: {event.dest_path} (was {event.src_path})")
             self._handle(event.dest_path)
 
 
-# ── Module-level state ─────────────────────────────────────────
-_observer: Observer | None = None
+def _launch(folder, capture_fn):
+    obs = PollingObserver(timeout=2)     # poll every 2 seconds
+    obs.schedule(FLPHandler(capture_fn), path=folder, recursive=True)
+    obs.start()
+    logging.info(f'[Watcher] Polling: {os.path.abspath(folder)}')
+    return obs
 
 
-def start_watcher(folder: str, capture_fn) -> Observer:
+def _guardian(folder, capture_fn):
+    """Restarts the observer automatically if it dies."""
     global _observer
+    while True:
+        time.sleep(5)
+        with _lock:
+            if _observer is None:
+                break                    # stop() was called — exit guardian
+            if not _observer.is_alive():
+                logging.warning('[Watcher] Observer died — restarting...')
+                try:
+                    _observer.stop()
+                except Exception:
+                    pass
+                try:
+                    _observer = _launch(folder, capture_fn)
+                    logging.info('[Watcher] Restarted successfully.')
+                except Exception as e:
+                    logging.error(f'[Watcher] Restart failed: {e}')
+
+
+def start_watcher(folder, capture_fn):
+    global _observer, _capture_fn, _watch_folder
     os.makedirs(folder, exist_ok=True)
-    logging.info(f"Starting watcher on folder: {folder}")
-
-    if _observer and _observer.is_alive():
-        logging.info("Stopping existing watcher...")
-        _observer.stop()
-        _observer.join(timeout=3)
-
-    handler = FLPHandler(capture_fn)
-    _observer = Observer()
-    _observer.schedule(handler, path=folder, recursive=True)
-    _observer.start()
-    logging.info(f"Watcher now monitoring {os.path.abspath(folder)}")
+    with _lock:
+        if _observer and _observer.is_alive():
+            _observer.stop()
+            _observer.join(timeout=3)
+        _capture_fn   = capture_fn
+        _watch_folder = folder
+        _observer     = _launch(folder, capture_fn)
+    threading.Thread(target=_guardian, args=(folder, capture_fn),
+                     daemon=True, name='watcher-guardian').start()
     return _observer
 
 
 def stop_watcher():
-    global _observer
-    if _observer and _observer.is_alive():
-        logging.info("Stopping watcher...")
-        _observer.stop()
-        _observer.join(timeout=3)
-    _observer = None
-    logging.info("Watcher stopped")
+    global _observer, _capture_fn, _watch_folder
+    with _lock:
+        if _observer and _observer.is_alive():
+            _observer.stop()
+            _observer.join(timeout=3)
+        _observer = _capture_fn = _watch_folder = None
+    logging.info('[Watcher] Stopped.')
 
 
-def is_watching() -> bool:
+def is_watching():
     return _observer is not None and _observer.is_alive()
