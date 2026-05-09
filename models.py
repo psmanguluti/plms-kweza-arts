@@ -33,6 +33,7 @@ class Project(db.Model):
     user_id     = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     name        = db.Column(db.String(200), nullable=False)
     filepath    = db.Column(db.String(500), default='')
+    source_path = db.Column(db.String(500), default='')   # real FL Studio path on user's machine
     description = db.Column(db.Text,        default='')
     genre       = db.Column(db.String(100), default='')
     created_at  = db.Column(db.DateTime,    default=datetime.utcnow)

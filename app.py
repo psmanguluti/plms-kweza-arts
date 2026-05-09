@@ -23,7 +23,17 @@ login_manager.login_message = ''
 @login_manager.user_loader
 def load_user(uid): return User.query.get(int(uid))
 
-with app.app_context(): db.create_all()
+with app.app_context():
+    db.create_all()
+    # Migration: add source_path if missing (existing databases)
+    try:
+        from sqlalchemy import text
+        with db.engine.connect() as conn:
+            conn.execute(text("ALTER TABLE projects ADD COLUMN source_path VARCHAR(500) DEFAULT ''"))
+            conn.commit()
+        logging.info('[Migration] Added source_path column.')
+    except Exception:
+        pass  # column already exists
 
 
 # ── FLP Binary Parser (no external deps) ──────────────────────
@@ -102,9 +112,29 @@ def _parse_flp(fp: str) -> dict:
 def _make_capture_fn(do_backup: bool, watch_folder: str):
     def on_flp_change(filepath):
         with app.app_context():
+            fp_lower = filepath.lower()
+            # Tier 1: exact match against server-side copy
             proj = Project.query.filter(
-                db.func.lower(Project.filepath) == filepath.lower()
+                db.func.lower(Project.filepath) == fp_lower
             ).first()
+            # Tier 2: match against the stored real FL Studio path
+            if not proj:
+                proj = Project.query.filter(
+                    db.func.lower(Project.source_path) == fp_lower
+                ).first()
+            # Tier 3: match by filename stem (e.g. "private_school" from any path)
+            if not proj:
+                stem = os.path.splitext(os.path.basename(filepath))[0].lower()
+                candidates = Project.query.all()
+                for c in candidates:
+                    c_stem = os.path.splitext(os.path.basename(c.filepath))[0].lower()
+                    if c_stem == stem:
+                        proj = c
+                        # Permanently record the real path so tier 2 matches next time
+                        c.source_path = filepath
+                        db.session.commit()
+                        logging.info(f'[Watcher] Matched "{stem}" → "{c.name}" (source_path saved)')
+                        break
             if not proj:
                 logging.info(f'[Watcher] No project matched: {filepath}')
                 return
@@ -298,6 +328,7 @@ def create_project():
     proj = Project(user_id=current_user.id, name=name,
                    description=request.form.get('description', '').strip(),
                    filepath=filepath,
+                   source_path=filepath,   # remember the original FL Studio path
                    genre=request.form.get('genre', '').strip())
     db.session.add(proj); db.session.commit()
 
