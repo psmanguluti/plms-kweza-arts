@@ -1,0 +1,270 @@
+{% extends "base.html" %}
+
+{% block title %}Settings{% endblock %}
+{% block page_title %}Settings{% endblock %}
+{% block page_sub %}Configure your PLMS workspace and preferences{% endblock %}
+
+{% block content %}
+
+<div class="settings-grid">
+
+  <!-- ── General Settings ──────────────────────────────────────── -->
+  <div class="settings-section">
+    <div class="settings-section-header">
+      <div class="sh-icon"><i data-lucide="sliders-horizontal"></i></div>
+      <div class="sh-text">
+        <h4>General</h4>
+        <p>Watcher folder and core preferences</p>
+      </div>
+    </div>
+    <div class="settings-section-body">
+      <form method="POST" action="{{ url_for('settings') }}">
+        <input type="hidden" name="action" value="general">
+        <div class="setting-row">
+          <label>Watched Folder Path</label>
+          <input type="text" name="watched_folder" value="{{ s.watched_folder }}">
+        </div>
+        <div class="divider"></div>
+        <div class="toggle-row">
+          <div class="toggle-label">
+            Desktop Notifications
+            <small>Alert when a new version is captured</small>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" name="notifications_enabled"
+              {% if s.notifications_enabled %}checked{% endif %}>
+            <span class="toggle-track"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <div class="toggle-label">
+            Auto Backup
+            <small>Copy .flp on every captured version</small>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" name="auto_backup"
+              {% if s.auto_backup %}checked{% endif %}>
+            <span class="toggle-track"></span>
+          </label>
+        </div>
+        <div style="margin-top:20px">
+          <button type="submit" class="btn btn-primary btn-sm">
+            <i data-lucide="save"></i> Save General
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ── File Watcher ──────────────────────────────────────────── -->
+  <div class="settings-section">
+    <div class="settings-section-header">
+      <div class="sh-icon"><i data-lucide="eye"></i></div>
+      <div class="sh-text">
+        <h4>File Watcher</h4>
+        <p>Monitor FL Studio project saves in real time</p>
+      </div>
+    </div>
+    <div class="settings-section-body">
+      <div style="margin-bottom:20px">
+        <div class="watcher-badge {% if watcher_active %}active{% else %}inactive{% endif %}"
+             style="display:inline-flex;margin-bottom:14px">
+          <span class="dot"></span>
+          {% if watcher_active %}
+            Watcher is running and monitoring <strong style="margin-left:4px">{{ s.watched_folder }}</strong>
+          {% else %}
+            Watcher is stopped
+          {% endif %}
+        </div>
+        <p class="text-sm text-secondary" style="line-height:1.6">
+          When active, PLMS automatically captures a new version snapshot every time
+          an FL Studio <span class="mono" style="font-size:.8rem">.flp</span> file is
+          saved in the watched folder.
+        </p>
+      </div>
+      <form method="POST" action="{{ url_for('settings') }}">
+        <input type="hidden" name="action" value="toggle_watcher">
+        <button type="submit"
+                class="btn {% if watcher_active %}btn-danger{% else %}btn-primary{% endif %} btn-sm">
+          {% if watcher_active %}
+            <i data-lucide="pause-circle"></i> Stop Watcher
+          {% else %}
+            <i data-lucide="play-circle"></i> Start Watcher
+          {% endif %}
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ── Scoring Weights ───────────────────────────────────────── -->
+  <div class="settings-section">
+    <div class="settings-section-header">
+      <div class="sh-icon"><i data-lucide="gauge"></i></div>
+      <div class="sh-text">
+        <h4>Scoring Weights</h4>
+        <p>Tune how the quality score is calculated</p>
+      </div>
+    </div>
+    <div class="settings-section-body">
+      <form method="POST" action="{{ url_for('settings') }}">
+        <input type="hidden" name="action" value="scoring">
+        <div class="slider-row">
+          <label>
+            Tempo
+            <span id="val-w_tempo">{{ s.score_weight_tempo|round(0)|int }}</span>
+          </label>
+          <input type="range" id="w_tempo" name="w_tempo"
+                 min="0" max="60" step="1"
+                 value="{{ s.score_weight_tempo|round(0)|int }}">
+        </div>
+        <div class="slider-row">
+          <label>
+            Channels
+            <span id="val-w_channels">{{ s.score_weight_channels|round(0)|int }}</span>
+          </label>
+          <input type="range" id="w_channels" name="w_channels"
+                 min="0" max="60" step="1"
+                 value="{{ s.score_weight_channels|round(0)|int }}">
+        </div>
+        <div class="slider-row">
+          <label>
+            Patterns
+            <span id="val-w_patterns">{{ s.score_weight_patterns|round(0)|int }}</span>
+          </label>
+          <input type="range" id="w_patterns" name="w_patterns"
+                 min="0" max="60" step="1"
+                 value="{{ s.score_weight_patterns|round(0)|int }}">
+        </div>
+        <div class="slider-row">
+          <label>
+            Maturity
+            <span id="val-w_maturity">{{ s.score_weight_maturity|round(0)|int }}</span>
+          </label>
+          <input type="range" id="w_maturity" name="w_maturity"
+                 min="0" max="60" step="1"
+                 value="{{ s.score_weight_maturity|round(0)|int }}">
+        </div>
+        <p class="text-xs text-muted" style="margin:10px 0 16px">
+          Weights do not need to sum to 100. Each dimension is scored proportionally.
+        </p>
+        <button type="submit" class="btn btn-primary btn-sm">
+          <i data-lucide="save"></i> Save Weights
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ── Account ──────────────────────────────────────────────── -->
+  <div class="settings-section">
+    <div class="settings-section-header">
+      <div class="sh-icon"><i data-lucide="user-cog"></i></div>
+      <div class="sh-text">
+        <h4>Account</h4>
+        <p>Manage your profile and password</p>
+      </div>
+    </div>
+    <div class="settings-section-body">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:20px;padding:14px;background:var(--bg-elevated);border-radius:var(--radius-md);border:1px solid var(--border)">
+        <div class="user-avatar" style="width:44px;height:44px;font-size:.95rem">
+          {{ current_user.initials }}
+        </div>
+        <div>
+          <div style="font-weight:600;color:var(--text-1)">{{ current_user.username }}</div>
+          <div class="text-xs text-muted">{{ current_user.email }}</div>
+          <div class="text-xs" style="color:var(--gold);margin-top:2px;text-transform:capitalize">
+            {{ current_user.role }}
+          </div>
+        </div>
+      </div>
+      <form method="POST" action="{{ url_for('settings') }}">
+        <input type="hidden" name="action" value="password">
+        <div class="setting-row">
+          <label>Current Password</label>
+          <input type="password" name="current_password" placeholder="••••••••">
+        </div>
+        <div class="setting-row">
+          <label>New Password</label>
+          <input type="password" name="new_password" placeholder="at least 6 characters" minlength="6">
+        </div>
+        <button type="submit" class="btn btn-secondary btn-sm">
+          <i data-lucide="lock-keyhole"></i> Change Password
+        </button>
+      </form>
+      <div class="divider"></div>
+      <a href="{{ url_for('auth_logout') }}" class="btn btn-danger btn-sm">
+        <i data-lucide="log-out"></i> Sign Out
+      </a>
+    </div>
+  </div>
+
+  <!-- ── Database ─────────────────────────────────────────────── -->
+  <div class="settings-section">
+    <div class="settings-section-header">
+      <div class="sh-icon"><i data-lucide="database"></i></div>
+      <div class="sh-text">
+        <h4>Database</h4>
+        <p>Storage info and data utilities</p>
+      </div>
+    </div>
+    <div class="settings-section-body">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:20px">
+        <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-md);padding:14px">
+          <div class="text-xs text-muted" style="margin-bottom:4px">Projects</div>
+          <div class="mono" style="font-size:1.2rem;color:var(--text-1)">
+            {{ current_user.projects|length }}
+          </div>
+        </div>
+        <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-md);padding:14px">
+          <div class="text-xs text-muted" style="margin-bottom:4px">DB Size</div>
+          <div class="mono" style="font-size:1.2rem;color:var(--text-1)">{{ db_size }} KB</div>
+        </div>
+      </div>
+      <p class="text-sm text-secondary" style="margin-bottom:16px;line-height:1.6">
+        Load a set of realistic demo projects to explore the system without connecting FL Studio.
+      </p>
+      <form method="POST" action="{{ url_for('settings') }}">
+        <input type="hidden" name="action" value="demo">
+        <button type="submit" class="btn btn-secondary btn-sm">
+          <i data-lucide="sparkles"></i> Load Demo Projects
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ── About ────────────────────────────────────────────────── -->
+  <div class="settings-section">
+    <div class="settings-section-header">
+      <div class="sh-icon"><i data-lucide="info"></i></div>
+      <div class="sh-text">
+        <h4>About PLMS</h4>
+        <p>System information and version</p>
+      </div>
+    </div>
+    <div class="settings-section-body">
+      <div class="changes-list">
+        <div class="change-item" style="border:none;background:transparent;padding:6px 0">
+          <i data-lucide="music-2" style="color:var(--gold)"></i>
+          <span class="change-label">Application</span>
+          <span class="change-values"><strong>PLMS v1.0</strong></span>
+        </div>
+        <div class="change-item" style="border:none;background:transparent;padding:6px 0">
+          <i data-lucide="building-2" style="color:var(--teal)"></i>
+          <span class="change-label">Organisation</span>
+          <span class="change-values"><strong>Kweza Arts</strong></span>
+        </div>
+        <div class="change-item" style="border:none;background:transparent;padding:6px 0">
+          <i data-lucide="code-2" style="color:var(--text-3)"></i>
+          <span class="change-label">Stack</span>
+          <span class="change-values"><strong>Python · Flask · SQLite</strong></span>
+        </div>
+        <div class="change-item" style="border:none;background:transparent;padding:6px 0">
+          <i data-lucide="graduation-cap" style="color:var(--text-3)"></i>
+          <span class="change-label">Author</span>
+          <span class="change-values"><strong>Mzati Nakoma</strong></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

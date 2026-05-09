@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block page_title %}Studio Dashboard{% endblock %}
+{% block page_sub %}{{ current_user.username }}'s production overview{% endblock %}
+
+{% block topbar_actions %}
+  <button class="btn btn-primary btn-sm" data-modal-open="modal-new-project">
+    <i data-lucide="plus"></i> New Project
+  </button>
+{% endblock %}
+
+{% block content %}
+
+<!-- Stat row -->
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-icon gold"><i data-lucide="folder-open"></i></div>
+    <div class="stat-info">
+      <div class="stat-value">{{ total_projects }}</div>
+      <div class="stat-label">Total Projects</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon teal"><i data-lucide="git-branch"></i></div>
+    <div class="stat-info">
+      <div class="stat-value">{{ total_versions }}</div>
+      <div class="stat-label">Total Versions</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon green"><i data-lucide="bar-chart-2"></i></div>
+    <div class="stat-info">
+      <div class="stat-value">{{ avg_score }}</div>
+      <div class="stat-label">Avg Quality Score</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon purple"><i data-lucide="activity"></i></div>
+    <div class="stat-info">
+      <div class="stat-value">
+        {% if watcher_active %}On{% else %}Off{% endif %}
+      </div>
+      <div class="stat-label">Watcher Status</div>
+    </div>
+  </div>
+</div>
+
+<!-- Projects section header -->
+<div class="flex items-center justify-between mb-4">
+  <h2 class="serif" style="font-size:1.25rem;font-weight:600;color:var(--text-1)">
+    Your Projects
+  </h2>
+  {% if projects %}
+    <span class="badge badge-muted">{{ projects|length }} project{{ 's' if projects|length != 1 }}</span>
+  {% endif %}
+</div>
+
+{% if projects %}
+  <div class="projects-grid">
+    {% for proj in projects %}
+      <a href="{{ url_for('project_detail', project_id=proj.id) }}" class="project-card">
+        <div class="project-card-header">
+          <div class="project-card-meta">
+            <div class="project-card-name">{{ proj.name }}</div>
+            <div class="project-card-genre">
+              {% if proj.genre %}
+                <i data-lucide="music" style="width:11px;height:11px;display:inline;vertical-align:middle;"></i>
+                {{ proj.genre }}
+              {% else %}
+                No genre set
+              {% endif %}
+            </div>
+          </div>
+          <div class="project-card-score {{ proj.score_class }}">
+            {% if proj.latest_score > 0 %}
+              {{ proj.latest_score|round(1) }}
+            {% else %}
+              —
+            {% endif %}
+          </div>
+        </div>
+
+        <!-- Score bar -->
+        <div class="score-bar-wrap">
+          <div
+            class="score-bar-fill {{ proj.score_class }}"
+            data-score="{{ proj.latest_score }}"
+          ></div>
+        </div>
+
+        <div class="flex items-center justify-between">
+          <div class="project-card-stats">
+            <div class="project-card-stat">
+              <span class="pcs-value">{{ proj.version_count }}</span>
+              <span class="pcs-label">version{{ 's' if proj.version_count != 1 }}</span>
+            </div>
+            {% if proj.latest_version %}
+              <div class="project-card-stat">
+                <span class="pcs-value">{{ proj.latest_version.tempo|round(0)|int }}</span>
+                <span class="pcs-label">BPM</span>
+              </div>
+              <div class="project-card-stat">
+                <span class="pcs-value">{{ proj.latest_version.channel_count }}</span>
+                <span class="pcs-label">channels</span>
+              </div>
+            {% endif %}
+          </div>
+
+          <div class="trend-badge {{ proj.score_trend }}">
+            {% if proj.score_trend == 'up' %}
+              <i data-lucide="trending-up"></i> Improving
+            {% elif proj.score_trend == 'down' %}
+              <i data-lucide="trending-down"></i> Declining
+            {% else %}
+              <i data-lucide="minus"></i> Stable
+            {% endif %}
+          </div>
+        </div>
+
+        {% if proj.description %}
+          <p class="text-xs text-muted" style="margin-top:-4px;line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">
+            {{ proj.description }}
+          </p>
+        {% endif %}
+
+        <div class="text-xs text-muted" style="margin-top:auto;padding-top:4px;">
+          Created {{ proj.created_at.strftime('%d %b %Y') }}
+          {% if proj.latest_version %}
+            &nbsp;·&nbsp; Last capture {{ proj.latest_version.captured_at.strftime('%d %b') }}
+          {% endif %}
+        </div>
+      </a>
+    {% endfor %}
+  </div>
+
+{% else %}
+  <!-- Empty state -->
+  <div class="card">
+    <div class="empty-state">
+      <div class="empty-icon"><i data-lucide="music-2"></i></div>
+      <h3>No projects yet</h3>
+      <p>Create your first project to start tracking your music production lifecycle.</p>
+      <div style="margin-top:24px;display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap;">
+        <button class="btn btn-primary" data-modal-open="modal-new-project">
+          <i data-lucide="plus-circle"></i> Create a Project
+        </button>
+        <form method="POST" action="{{ url_for('settings') }}" style="margin:0">
+          <input type="hidden" name="action" value="demo">
+          <button type="submit" class="btn btn-secondary">
+            <i data-lucide="sparkles"></i> Load Demo Data
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+{% endif %}
+
+{% endblock %}

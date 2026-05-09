@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Create Account · PLMS</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+</head>
+<body>
+<div class="auth-page">
+
+  <!-- Left visual panel -->
+  <div class="auth-visual">
+    <div class="auth-visual-staff">
+      <span></span><span></span><span></span><span></span><span></span>
+    </div>
+    <div class="auth-visual-eq">
+      <span></span><span></span><span></span><span></span>
+      <span></span><span></span><span></span><span></span>
+    </div>
+    <div class="auth-tagline">
+      <div class="auth-tagline-brand">
+        <div class="brand-mark">PL</div>
+        <div class="brand-name">Kweza Arts · PLMS</div>
+      </div>
+      <h1>Your studio,<br><em>intelligently</em><br>managed.</h1>
+      <p>
+        Version control, quality scoring, and predictive insight
+        for every FL Studio project — all in one place.
+      </p>
+    </div>
+  </div>
+
+  <!-- Right form panel -->
+  <div class="auth-form-panel">
+    <h2>Create account</h2>
+    <p class="auth-sub">
+      Already have an account?
+      <a href="{{ url_for('auth_login') }}">Sign in</a>
+    </p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="auth-alert {{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    <form method="POST" action="{{ url_for('auth_register') }}">
+      <div class="form-field">
+        <label>Username</label>
+        <div class="input-wrap">
+          <i data-lucide="at-sign"></i>
+          <input
+            type="text"
+            name="username"
+            placeholder="choose a username"
+            autocomplete="username"
+            minlength="3"
+            required
+            autofocus
+          >
+        </div>
+      </div>
+
+      <div class="form-field">
+        <label>Email Address</label>
+        <div class="input-wrap">
+          <i data-lucide="mail"></i>
+          <input
+            type="email"
+            name="email"
+            placeholder="you@example.com"
+            autocomplete="email"
+            required
+          >
+        </div>
+      </div>
+
+      <div class="form-field">
+        <label>Password</label>
+        <div class="input-wrap">
+          <i data-lucide="lock"></i>
+          <input
+            type="password"
+            name="password"
+            placeholder="at least 6 characters"
+            autocomplete="new-password"
+            minlength="6"
+            required
+          >
+        </div>
+      </div>
+
+      <div class="form-field">
+        <label>Confirm Password</label>
+        <div class="input-wrap">
+          <i data-lucide="lock-keyhole"></i>
+          <input
+            type="password"
+            name="confirm_password"
+            placeholder="repeat your password"
+            autocomplete="new-password"
+            required
+          >
+        </div>
+      </div>
+
+      <button type="submit" class="btn btn-primary btn-full" style="margin-top:8px">
+        <i data-lucide="user-plus"></i> Create Account
+      </button>
+    </form>
+  </div>
+</div>
+<script>lucide.createIcons();</script>
+</body>
+</html>

@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.name }}{% endblock %}
+
+{% block page_title %}{{ project.name }}{% endblock %}
+{% block page_sub %}
+  {% if project.genre %}<span style="color:var(--gold)">{{ project.genre }}</span> &nbsp;·&nbsp; {% endif %}
+  {{ project.version_count }} version{{ 's' if project.version_count != 1 }}
+  {% if project.filepath %}&nbsp;·&nbsp; <span class="mono" style="font-size:.75rem">{{ project.filepath }}</span>{% endif %}
+{% endblock %}
+
+{% block topbar_actions %}
+  <form method="POST" action="{{ url_for('add_demo_version', project_id=project.id) }}" style="margin:0">
+    <button type="submit" class="btn btn-secondary btn-sm">
+      <i data-lucide="git-commit-horizontal"></i> Simulate Save
+    </button>
+  </form>
+  <button class="btn btn-danger btn-sm"
+          onclick="confirmDelete('{{ project.name }}','delete-form-{{ project.id }}')">
+    <i data-lucide="trash-2"></i> Delete
+  </button>
+  <form id="delete-form-{{ project.id }}"
+        method="POST"
+        action="{{ url_for('delete_project', project_id=project.id) }}"
+        style="display:none"></form>
+{% endblock %}
+
+{% block content %}
+
+<!-- Hidden chart data for JS -->
+<script type="application/json" id="chart-data">{{ chart_data }}</script>
+
+<!-- ── Stats row ──────────────────────────────────────────────── -->
+<div class="stat-grid" style="margin-bottom:28px">
+  <div class="stat-card">
+    <div class="stat-icon gold"><i data-lucide="git-branch"></i></div>
+    <div class="stat-info">
+      <div class="stat-value">{{ project.version_count }}</div>
+      <div class="stat-label">Total Versions</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon green"><i data-lucide="bar-chart-2"></i></div>
+    <div class="stat-info">
+      <div class="stat-value {{ project.score_class }}">
+        {{ project.latest_score|round(1) if project.latest_score else '—' }}
+      </div>
+      <div class="stat-label">Latest Score</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon teal"><i data-lucide="music-4"></i></div>
+    <div class="stat-info">
+      <div class="stat-value">
+        {% if project.latest_version %}{{ project.latest_version.tempo|round(1) }}{% else %}—{% endif %}
+      </div>
+      <div class="stat-label">Current BPM</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon purple"><i data-lucide="layers"></i></div>
+    <div class="stat-info">
+      <div class="stat-value">
+        {% if project.latest_version %}{{ project.latest_version.channel_count }}{% else %}—{% endif %}
+      </div>
+      <div class="stat-label">Channels</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Version Timeline ──────────────────────────────────────── -->
+<div class="card mb-6">
+  <div class="card-header">
+    <h3><i data-lucide="git-commit-horizontal" style="width:16px;height:16px;display:inline;vertical-align:middle;margin-right:8px;color:var(--gold)"></i>Version Timeline</h3>
+    <span class="badge badge-muted">{{ project.version_count }} versions</span>
+  </div>
+  <div class="card-body" style="padding-bottom:8px">
+    {% if project.versions %}
+      <div class="timeline-scroll">
+        {% for version in project.versions|reverse %}
+          <div class="version-card {% if loop.first %}latest{% endif %}">
+            <div class="version-num">VERSION {{ version.version_num }}</div>
+            <div class="version-score {{ version.score_class }}">
+              {{ version.quality_score|round(0)|int }}
+            </div>
+            <div class="version-meta">
+              <div class="version-meta-row">
+                <span>Tempo</span>
+                <span>{{ version.tempo|round(0)|int }} BPM</span>
+              </div>
+              <div class="version-meta-row">
+                <span>Channels</span>
+                <span>{{ version.channel_count }}</span>
+              </div>
+              <div class="version-meta-row">
+                <span>Patterns</span>
+                <span>{{ version.pattern_count }}</span>
+              </div>
+            </div>
+            <div class="score-bar-wrap" style="margin-bottom:10px">
+              <div class="score-bar-fill {{ version.score_class }}"
+                   data-score="{{ version.quality_score }}"></div>
+            </div>
+            <div class="version-date">
+              {{ version.captured_at.strftime('%d %b %Y · %H:%M') }}
+            </div>
+            {% if not loop.first %}
+              <button
+                class="version-rollback"
+                data-project-id="{{ project.id }}"
+                data-version-num="{{ version.version_num }}">
+                <i data-lucide="rotate-ccw"></i> Rollback
+              </button>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-state" style="padding:48px 24px">
+        <div class="empty-icon"><i data-lucide="git-commit-horizontal"></i></div>
+        <h3>No versions yet</h3>
+        <p>Save an FL Studio file in your watched folder, or use "Simulate Save" to add a demo version.</p>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ── Two-column: Changes + Predictions ─────────────────────── -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px">
+
+  <!-- Latest changes -->
+  <div class="card">
+    <div class="card-header">
+      <h3><i data-lucide="diff" style="width:16px;height:16px;display:inline;vertical-align:middle;margin-right:8px;color:var(--gold)"></i>Latest Changes</h3>
+      {% if project.latest_version %}
+        <span class="badge badge-muted">v{{ project.latest_version.version_num }}</span>
+      {% endif %}
+    </div>
+    <div class="card-body">
+      {% if project.latest_version and project.latest_version.changes and project.latest_version.changes.total > 0 %}
+        <div class="changes-list">
+          {% for key, change in project.latest_version.changes.items() %}
+            {% if key != 'total' %}
+              <div class="change-item {{ change.direction }}">
+                {% if change.direction == 'increased' %}
+                  <i data-lucide="arrow-up-right"></i>
+                {% else %}
+                  <i data-lucide="arrow-down-right"></i>
+                {% endif %}
+                <span class="change-label">{{ change.label }}</span>
+                <span class="change-values">
+                  <strong>{{ change.before }}</strong>
+                  →
+                  <strong>{{ change.after }}</strong>
+                  <span style="color:var(--text-3)">({{ '+' if change.delta > 0 else '' }}{{ change.delta }} {{ change.unit }})</span>
+                </span>
+              </div>
+            {% endif %}
+          {% endfor %}
+        </div>
+      {% elif project.version_count == 1 %}
+        <div class="empty-state" style="padding:32px 0">
+          <div class="empty-icon"><i data-lucide="git-commit-horizontal"></i></div>
+          <p>This is the first version. Changes will appear from version 2 onwards.</p>
+        </div>
+      {% else %}
+        <div class="empty-state" style="padding:32px 0">
+          <div class="empty-icon"><i data-lucide="check-circle"></i></div>
+          <p>No measurable changes detected between the last two versions.</p>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Predictions -->
+  <div class="card">
+    <div class="card-header">
+      <h3><i data-lucide="wand-2" style="width:16px;height:16px;display:inline;vertical-align:middle;margin-right:8px;color:var(--gold)"></i>Predictions</h3>
+      {% if predictions %}
+        <span class="badge badge-gold">
+          {% if predictions.quality_score and predictions.quality_score.confidence %}
+            {{ predictions.quality_score.confidence|capitalize }} confidence
+          {% endif %}
+        </span>
+      {% endif %}
+    </div>
+    <div class="card-body">
+      {% if predictions %}
+        <div class="prediction-grid" style="grid-template-columns:1fr">
+          {% if predictions.quality_score and predictions.quality_score.available %}
+            {% set qs = predictions.quality_score %}
+            <div class="prediction-item">
+              <div class="pred-metric">Next Score (v{{ qs.next_version }})</div>
+              <div class="pred-value {{ 'score-high' if qs.predicted_value >= 70 else ('score-mid' if qs.predicted_value >= 40 else 'score-low') }}">
+                {{ qs.predicted_value|round(1) }}
+              </div>
+              <div class="pred-trend {{ qs.trend }}">
+                <i data-lucide="{{ 'trending-up' if qs.trend in ['growing','improving'] else ('trending-down' if qs.trend in ['declining','tapering'] else 'minus') }}"
+                   style="width:12px;height:12px;display:inline;vertical-align:middle;margin-right:4px"></i>
+                {{ qs.trend|capitalize }}
+              </div>
+            </div>
+          {% endif %}
+          {% if predictions.channel_count and predictions.channel_count.available %}
+            {% set cc = predictions.channel_count %}
+            <div class="prediction-item">
+              <div class="pred-metric">Expected Channels (v{{ cc.next_version }})</div>
+              <div class="pred-value">{{ cc.predicted_value|round(0)|int }}</div>
+              <div class="pred-trend {{ cc.trend }}">{{ cc.trend|capitalize }}</div>
+            </div>
+          {% endif %}
+          {% if predictions.tempo and predictions.tempo.available %}
+            {% set t = predictions.tempo %}
+            <div class="prediction-item">
+              <div class="pred-metric">Predicted Tempo (v{{ t.next_version }})</div>
+              <div class="pred-value">{{ t.predicted_value|round(1) }} BPM</div>
+              <div class="pred-trend {{ t.trend }}">{{ t.trend|capitalize }}</div>
+            </div>
+          {% endif %}
+        </div>
+      {% else %}
+        <div class="empty-state" style="padding:32px 0">
+          <div class="empty-icon"><i data-lucide="wand-2"></i></div>
+          <p>Add at least 3 versions to unlock production trajectory predictions.</p>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- ── Charts ──────────────────────────────────────────────────── -->
+{% if project.versions|length >= 2 %}
+<div class="chart-grid">
+  <div class="chart-wrap">
+    <h4>Quality Score Over Time</h4>
+    <canvas id="chart-score" height="160"></canvas>
+  </div>
+  <div class="chart-wrap">
+    <h4>Channel Growth</h4>
+    <canvas id="chart-channels" height="160"></canvas>
+  </div>
+  <div class="chart-wrap">
+    <h4>Tempo Evolution</h4>
+    <canvas id="chart-tempo" height="160"></canvas>
+  </div>
+  <div class="chart-wrap">
+    <h4>Pattern Complexity</h4>
+    <canvas id="chart-patterns" height="160"></canvas>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}
