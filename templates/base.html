@@ -7,6 +7,156 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <style>
+    /* ── New Project Modal ── */
+    .modal { max-width: 560px; width: 100%; }
+
+    .flp-drop-zone {
+      position: relative;
+      border: 2px dashed var(--border);
+      border-radius: 10px;
+      padding: 32px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+      background: var(--surface-2);
+      overflow: hidden;
+    }
+    .flp-drop-zone:hover,
+    .flp-drop-zone.drag-over {
+      border-color: var(--gold);
+      background: rgba(200,146,10,.06);
+    }
+    /* The real file input covers the whole zone — invisible but clickable */
+    .flp-drop-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+      font-size: 0;
+    }
+    .flp-drop-visual { pointer-events: none; }
+    .flp-drop-icon   { font-size: 2.2rem; margin-bottom: 8px; line-height: 1; }
+    .flp-drop-text   { font-size: .82rem; color: var(--text-3); line-height: 1.6; }
+    .flp-drop-text strong { color: var(--gold); }
+
+    /* Selected file pill */
+    .flp-file-pill {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      padding: 7px 12px;
+      background: rgba(200,146,10,.1);
+      border: 1px solid rgba(200,146,10,.25);
+      border-radius: 8px;
+      font-size: .78rem;
+      color: var(--text-1);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .flp-file-pill svg { color: var(--gold); flex-shrink: 0; }
+
+    /* Analysing spinner row */
+    .flp-analysing {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+      font-size: .78rem;
+      color: var(--text-3);
+    }
+    .flp-analysing.show { display: flex; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .flp-spinner {
+      width: 14px; height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--gold);
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+      flex-shrink: 0;
+    }
+
+    /* Error message */
+    .flp-error {
+      display: none;
+      margin-top: 8px;
+      padding: 8px 12px;
+      background: rgba(248,113,113,.08);
+      border: 1px solid rgba(248,113,113,.2);
+      border-radius: 8px;
+      font-size: .76rem;
+      color: #f87171;
+      line-height: 1.5;
+    }
+    .flp-error.show { display: block; }
+
+    /* Analytics preview card */
+    .flp-analytics {
+      display: none;
+      margin-top: 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      animation: slideUp .2s ease;
+    }
+    .flp-analytics.show { display: block; }
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: none; }
+    }
+    .flp-analytics-hdr {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: .68rem;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--gold);
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    .flp-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+    }
+    .flp-metric { text-align: center; }
+    .flp-metric-val {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--text-1);
+      font-family: 'JetBrains Mono', monospace;
+      line-height: 1.2;
+    }
+    .flp-metric-lbl {
+      font-size: .62rem;
+      color: var(--text-3);
+      margin-top: 3px;
+    }
+    .flp-quality-bar {
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      margin-top: 12px;
+      overflow: hidden;
+    }
+    .flp-quality-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: linear-gradient(90deg, var(--gold), #f0b429);
+      transition: width .7s cubic-bezier(.4,0,.2,1);
+      width: 0%;
+    }
+    .flp-meta {
+      font-size: .62rem;
+      color: var(--text-3);
+      text-align: right;
+      margin-top: 6px;
+    }
+  </style>
 </head>
 <body>
 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -61,6 +211,7 @@
       </div>
     </div>
   </aside>
+
   <div class="main-content">
     <header class="topbar">
       <button id="sidebar-toggle" class="btn btn-ghost"><i data-lucide="menu"></i></button>
@@ -70,51 +221,320 @@
       </div>
       <div class="topbar-actions">
         {% block topbar_actions %}{% endblock %}
-        <span class="watcher-badge {% if watcher_active is defined and watcher_active %}active{% else %}inactive{% endif %}">
+        <!--
+          Badge: server sets initial state via context_processor.
+          JS then polls /api/watcher_status every 5 s and keeps it live
+          on ALL pages — dashboard, project pages, settings, everywhere.
+        -->
+        <span class="watcher-badge {% if watcher_active %}active{% else %}inactive{% endif %}"
+              id="watcher-badge">
           <span class="dot"></span>
-          {% if watcher_active is defined and watcher_active %}Watcher On{% else %}Watcher Off{% endif %}
+          <span id="watcher-label">
+            {% if watcher_active %}Watcher On{% else %}Watcher Off{% endif %}
+          </span>
         </span>
       </div>
     </header>
     <main class="page-body">{% block content %}{% endblock %}</main>
   </div>
 </div>
+
+<!-- ══════════════════════════════════════════════════════════
+     New Project Modal
+     Form uses enctype="multipart/form-data" so the .flp file
+     is uploaded to the server (not just referenced by path).
+     Analytics are fetched by sending the file to /api/analyze_flp
+     as soon as it is selected — before the user submits.
+════════════════════════════════════════════════════════════ -->
 <div class="modal-backdrop" id="modal-new-project">
   <div class="modal">
     <h3 class="serif">New Project</h3>
-    <p>Create a new production project to begin tracking its lifecycle.</p>
-    <form method="POST" action="{{ url_for('create_project') }}">
+    <p style="margin-bottom:16px;color:var(--text-3);font-size:.85rem">
+      Select your FL Studio file — initial analytics will be captured automatically.
+    </p>
+
+    <form method="POST"
+          action="{{ url_for('create_project') }}"
+          enctype="multipart/form-data"
+          id="new-project-form">
+
       <div class="modal-form-fields">
+
+        <!-- ── FLP file picker ── -->
+        <div>
+          <label>FL Studio File (.flp)</label>
+
+          <div class="flp-drop-zone" id="flp-drop-zone">
+            <!-- Invisible real input — covers entire zone -->
+            <input type="file"
+                   name="flp_file"
+                   id="flp-file-input"
+                   accept=".flp"
+                   tabindex="-1">
+            <!-- Visual layer (pointer-events:none so clicks fall through to input) -->
+            <div class="flp-drop-visual">
+              <div class="flp-drop-icon">🎵</div>
+              <div class="flp-drop-text">
+                <strong>Click to browse</strong> or drag &amp; drop your .flp file
+                <br>
+                <span style="font-size:.72rem;opacity:.7">
+                  Initial analytics captured automatically on select
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Selected file pill -->
+          <div class="flp-file-pill" id="flp-file-pill">
+            <i data-lucide="file-music" style="width:13px;height:13px"></i>
+            <span id="flp-file-name"></span>
+          </div>
+
+          <!-- Analysing state -->
+          <div class="flp-analysing" id="flp-analysing">
+            <div class="flp-spinner"></div>
+            <span>Analysing file…</span>
+          </div>
+
+          <!-- Error state -->
+          <div class="flp-error" id="flp-error"></div>
+
+          <!-- Analytics preview card -->
+          <div class="flp-analytics" id="flp-analytics">
+            <div class="flp-analytics-hdr">
+              <i data-lucide="bar-chart-2" style="width:13px;height:13px"></i>
+              Initial File Analytics
+            </div>
+            <div class="flp-grid">
+              <div class="flp-metric">
+                <div class="flp-metric-val" id="a-tempo">—</div>
+                <div class="flp-metric-lbl">BPM</div>
+              </div>
+              <div class="flp-metric">
+                <div class="flp-metric-val" id="a-channels">—</div>
+                <div class="flp-metric-lbl">Channels</div>
+              </div>
+              <div class="flp-metric">
+                <div class="flp-metric-val" id="a-patterns">—</div>
+                <div class="flp-metric-lbl">Patterns</div>
+              </div>
+              <div class="flp-metric">
+                <div class="flp-metric-val" id="a-score">—</div>
+                <div class="flp-metric-lbl">Quality</div>
+              </div>
+            </div>
+            <div class="flp-quality-bar">
+              <div class="flp-quality-fill" id="a-score-bar"></div>
+            </div>
+            <div class="flp-meta" id="a-meta"></div>
+          </div>
+        </div>
+
+        <!-- Project name — auto-filled from filename -->
         <div>
           <label>Project Name *</label>
-          <input type="text" name="name" placeholder="e.g. Summer Anthem" required>
+          <input type="text"
+                 name="name"
+                 id="proj-name"
+                 placeholder="e.g. Summer Anthem"
+                 required>
         </div>
+
         <div>
           <label>Genre</label>
           <select name="genre">
             <option value="">Select genre…</option>
-            <option>Afrobeats</option><option>Amapiano</option><option>Afro-fusion</option>
-            <option>Hip-hop</option><option>R&B</option><option>Gospel</option>
-            <option>EDM</option><option>Other</option>
+            <option>Afrobeats</option>
+            <option>Amapiano</option>
+            <option>Afro-fusion</option>
+            <option>Hip-hop</option>
+            <option>R&amp;B</option>
+            <option>Gospel</option>
+            <option>EDM</option>
+            <option>Other</option>
           </select>
         </div>
-        <div>
-          <label>FL Studio File Path</label>
-          <input type="text" name="filepath" placeholder="./projects/track.flp">
-        </div>
+
         <div>
           <label>Description</label>
-          <textarea name="description" placeholder="Brief notes about this project…"></textarea>
+          <textarea name="description"
+                    placeholder="Brief notes about this project…"></textarea>
         </div>
       </div>
+
       <div class="modal-actions">
         <button type="button" class="btn btn-secondary" data-modal-close>Cancel</button>
-        <button type="submit" class="btn btn-primary"><i data-lucide="plus-circle"></i> Create Project</button>
+        <button type="submit" class="btn btn-primary">
+          <i data-lucide="plus-circle"></i> Create Project
+        </button>
       </div>
     </form>
   </div>
 </div>
+
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 {% block extra_js %}{% endblock %}
+
+<script>
+/* ══════════════════════════════════════════════════════════════
+   WATCHER BADGE — live polling
+   Polls /api/watcher_status every 5 s.
+   The server handles the DB↔process sync; we just reflect what
+   it says. This runs on every page so the badge is always correct.
+════════════════════════════════════════════════════════════════ */
+(function () {
+  var badge = document.getElementById('watcher-badge');
+  var label = document.getElementById('watcher-label');
+  if (!badge || !label) return;
+
+  function applyState(active) {
+    badge.className = 'watcher-badge ' + (active ? 'active' : 'inactive');
+    label.textContent = active ? 'Watcher On' : 'Watcher Off';
+  }
+
+  function poll() {
+    fetch('/api/watcher_status', { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { if (d !== null) applyState(d.active); })
+      .catch(function () { /* ignore transient failures */ });
+  }
+
+  poll();                        // run immediately on page load
+  setInterval(poll, 5000);       // then every 5 s
+})();
+
+
+/* ══════════════════════════════════════════════════════════════
+   NEW PROJECT MODAL — FLP file picker + live analytics
+   
+   Key design:
+   • The <input type="file"> is the real native picker, invisible
+     but covering the whole drop zone so it catches all clicks.
+   • On file select we POST the file to /api/analyze_flp using
+     FormData — the server receives bytes, not a path.
+   • The same file is submitted with the main form (the input has
+     name="flp_file") so the server saves it and creates version 1.
+════════════════════════════════════════════════════════════════ */
+(function () {
+  var dropZone   = document.getElementById('flp-drop-zone');
+  var fileInput  = document.getElementById('flp-file-input');
+  var filePill   = document.getElementById('flp-file-pill');
+  var fileName   = document.getElementById('flp-file-name');
+  var analysing  = document.getElementById('flp-analysing');
+  var errorEl    = document.getElementById('flp-error');
+  var analytics  = document.getElementById('flp-analytics');
+  var projName   = document.getElementById('proj-name');
+
+  if (!dropZone || !fileInput) return;
+
+  /* helpers */
+  function showError(msg) {
+    hide(analysing); hide(analytics);
+    errorEl.textContent = msg;
+    show(errorEl);
+  }
+  function show(el) { el.classList.add('show'); }
+  function hide(el) { el.classList.remove('show'); }
+  function reset()  {
+    hide(filePill); hide(analysing); hide(errorEl); hide(analytics);
+    filePill.style.display = '';
+    fileInput.value = '';
+    if (projName) projName.value = '';
+  }
+
+  function handleFile(file) {
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.flp')) {
+      showError('Please select an FL Studio .flp file.');
+      return;
+    }
+
+    /* show pill */
+    fileName.textContent = file.name;
+    filePill.style.display = 'flex'; show(filePill);
+    hide(errorEl); hide(analytics);
+
+    /* auto-fill project name */
+    if (projName && !projName.value.trim()) {
+      var base = file.name.replace(/\.flp$/i, '').replace(/[_\-]+/g, ' ').trim();
+      projName.value = base.charAt(0).toUpperCase() + base.slice(1);
+    }
+
+    /* send file to server for analysis */
+    show(analysing);
+    var fd = new FormData();
+    fd.append('flp_file', file);
+
+    fetch('/api/analyze_flp', {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: fd                  /* multipart — no Content-Type header needed */
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      hide(analysing);
+      if (!d.ok) { showError(d.error || 'Could not analyse file.'); return; }
+
+      document.getElementById('a-tempo').textContent    = d.tempo;
+      document.getElementById('a-channels').textContent = d.channel_count;
+      document.getElementById('a-patterns').textContent = d.pattern_count;
+      document.getElementById('a-score').textContent    = d.quality_score;
+      document.getElementById('a-score-bar').style.width =
+        Math.min(Math.max(d.quality_score, 0), 100) + '%';
+      document.getElementById('a-meta').textContent =
+        d.filename + ' · ' + d.size_kb + ' KB';
+
+      show(analytics);
+      lucide.createIcons({ nodes: [analytics] });
+    })
+    .catch(function (err) {
+      hide(analysing);
+      /* Non-fatal — file is still attached, project will still be created */
+      showError('Analytics preview unavailable, but the file is attached and will be processed on creation.');
+    });
+  }
+
+  /* native input change */
+  fileInput.addEventListener('change', function () {
+    if (fileInput.files && fileInput.files.length > 0) {
+      handleFile(fileInput.files[0]);
+    }
+  });
+
+  /* drag-and-drop */
+  dropZone.addEventListener('dragover', function (e) {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+  dropZone.addEventListener('dragleave', function () {
+    dropZone.classList.remove('drag-over');
+  });
+  dropZone.addEventListener('drop', function (e) {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) {
+      /* inject file into the real input so it submits with the form */
+      try {
+        var dt = new DataTransfer();
+        dt.items.add(f);
+        fileInput.files = dt.files;
+      } catch (ex) { /* Firefox fallback: file won't auto-submit but analytics still shows */ }
+      handleFile(f);
+    }
+  });
+
+  /* reset when modal closes */
+  document.querySelectorAll('[data-modal-close]').forEach(function (b) {
+    b.addEventListener('click', reset);
+  });
+  var backdrop = document.getElementById('modal-new-project');
+  if (backdrop) {
+    backdrop.addEventListener('click', function (e) {
+      if (e.target === backdrop) reset();
+    });
+  }
+})();
+</script>
 </body>
 </html>
