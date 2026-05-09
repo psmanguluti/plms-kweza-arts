@@ -1,4 +1,4 @@
-import os, json, shutil, random
+import os, json, shutil, random, logging
 from datetime import datetime
 from flask import (Flask, render_template, request, jsonify,
                    redirect, url_for, flash)
@@ -7,6 +7,9 @@ from flask_login import (LoginManager, login_user, logout_user,
 from models  import db, User, Project, Version, AppSettings
 from engines import ChangeEngine, ScoringEngine, PredictionEngine
 from watcher import start_watcher, stop_watcher, is_watching
+
+# Configure logging for the main app
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI']        = 'sqlite:///plms.db'
@@ -54,7 +57,9 @@ def _parse_flp(fp):
         import pyflp; p = pyflp.parse(fp)
         return dict(tempo=float(p.tempo), channel_count=len(list(p.channels)),
                     pattern_count=len(list(p.patterns)))
-    except: return dict(tempo=120.0, channel_count=0, pattern_count=0)
+    except Exception as e:
+        logging.warning(f"Failed to parse {fp}: {e}")
+        return dict(tempo=120.0, channel_count=0, pattern_count=0)
 
 def _load_demo(uid):
     demos = [
@@ -164,7 +169,8 @@ def project_detail(project_id):
                  tempos=[v.tempo for v in proj.versions],
                  patterns=[v.pattern_count for v in proj.versions])
     return render_template('project.html', project=proj,
-                           predictions=preds, chart_data=json.dumps(chart))
+                           predictions=preds, chart_data=json.dumps(chart),
+                           watcher_active=is_watching())
 
 @app.route('/project/<int:project_id>/delete', methods=['POST'])
 @login_required
@@ -173,27 +179,7 @@ def delete_project(project_id):
     name = proj.name; db.session.delete(proj); db.session.commit()
     flash(f'Project "{name}" deleted.','success'); return redirect(url_for('dashboard'))
 
-@app.route('/project/<int:project_id>/demo-version', methods=['POST'])
-@login_required
-def add_demo_version(project_id):
-    proj = Project.query.filter_by(id=project_id, user_id=current_user.id).first_or_404()
-    v = _build_version(proj)
-    flash(f'Version {v.version_num} added (score: {v.quality_score}).','success')
-    return redirect(url_for('project_detail', project_id=project_id))
-
 # ── API ────────────────────────────────────────────────────────
-@app.route('/api/capture', methods=['POST'])
-def api_capture():
-    data = request.get_json(silent=True) or {}
-    fp   = data.get('filepath','')
-    proj = Project.query.filter_by(filepath=fp).first()
-    if not proj:
-        name = os.path.splitext(os.path.basename(fp))[0]
-        proj = Project(user_id=1, name=name, filepath=fp)
-        db.session.add(proj); db.session.commit()
-    v = _build_version(proj, data=_parse_flp(fp))
-    return jsonify(success=True, version=v.version_num, score=v.quality_score)
-
 @app.route('/api/rollback', methods=['POST'])
 @login_required
 def api_rollback():
@@ -208,6 +194,18 @@ def api_rollback():
     else:
         msg += ' (demo mode — no backup file on disk)'
     return jsonify(success=True, message=msg)
+
+@app.route('/api/project/<int:project_id>/latest')
+@login_required
+def api_latest(project_id):
+    proj = Project.query.filter_by(id=project_id,
+                                   user_id=current_user.id).first_or_404()
+    lv   = proj.latest_version
+    return jsonify({
+        'version_count': proj.version_count,
+        'latest_version': lv.version_num   if lv else 0,
+        'latest_score':   lv.quality_score if lv else 0,
+    })
 
 # ── Settings ───────────────────────────────────────────────────
 @app.route('/settings', methods=['GET','POST'])
@@ -230,8 +228,36 @@ def settings():
             s.score_weight_maturity = float(request.form.get('w_maturity',15))
             db.session.commit(); flash('Scoring weights updated.','success')
         elif action == 'toggle_watcher':
-            if is_watching(): stop_watcher(); s.watcher_active=False; flash('Watcher stopped.','success')
-            else: start_watcher(s.watched_folder, lambda fp: None); s.watcher_active=True; flash('Watcher started.','success')
+            if is_watching():
+                stop_watcher()
+                s.watcher_active = False
+                flash('Watcher stopped.','success')
+            else:
+                # Real callback that captures versions when an .flp changes
+                def on_flp_change(filepath):
+                    with app.app_context():
+                        # Find project by exact filepath (case‑insensitive)
+                        proj = Project.query.filter(db.func.lower(Project.filepath) == filepath.lower()).first()
+                        if not proj:
+                            logging.info(f"Watcher: No project found for {filepath}")
+                            return
+                        data = _parse_flp(filepath)
+                        if not data or data['channel_count'] == 0 and data['pattern_count'] == 0:
+                            logging.warning(f"Watcher: Failed to parse or empty metadata for {filepath}")
+                            return
+                        v = _build_version(proj, data=data)
+                        logging.info(f"Watcher: Captured version {v.version_num} for project '{proj.name}' (score {v.quality_score})")
+                        # Optional: auto‑backup if enabled
+                        if s.auto_backup and os.path.exists(filepath):
+                            backup_dir = os.path.join(os.path.dirname(filepath), 'plms_backups')
+                            os.makedirs(backup_dir, exist_ok=True)
+                            backup_path = os.path.join(backup_dir, f"{proj.name}_v{v.version_num}.flp")
+                            shutil.copy2(filepath, backup_path)
+                            v.backup_path = backup_path
+                            db.session.commit()
+                start_watcher(s.watched_folder, on_flp_change)
+                s.watcher_active = True
+                flash('Watcher started. Real‑time capture active.','success')
             db.session.commit()
         elif action == 'demo':
             _load_demo(current_user.id); flash('Demo projects loaded.','success')
@@ -245,26 +271,6 @@ def settings():
         return redirect(url_for('settings'))
     db_size = os.path.getsize('plms.db')//1024 if os.path.exists('plms.db') else 0
     return render_template('settings.html', s=s, watcher_active=is_watching(), db_size=db_size)
-
-# ── Paste this block into app.py just before the last two lines ──
-# (before:  if __name__ == '__main__':  )
-
-@app.route('/api/project/<int:project_id>/latest')
-@login_required
-def api_latest(project_id):
-    """
-    Lightweight poll endpoint.
-    Returns the latest version number and score so the browser
-    can detect when a new version has been captured.
-    """
-    proj = Project.query.filter_by(id=project_id,
-                                   user_id=current_user.id).first_or_404()
-    lv   = proj.latest_version
-    return jsonify({
-        'version_count': proj.version_count,
-        'latest_version': lv.version_num   if lv else 0,
-        'latest_score':   lv.quality_score if lv else 0,
-    })
 
 if __name__ == '__main__':
     app.run(debug=True, use_reloader=False, port=5000)

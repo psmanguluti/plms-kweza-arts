@@ -25,9 +25,6 @@ plms.db
 *.sqlite
 *.sqlite3
 
-# ── Backups folder (captured .flp copies) ────────────────────
-backups/
-projects/
 
 # ── Environment variables ─────────────────────────────────────
 .env

@@ -10,11 +10,6 @@
 {% endblock %}
 
 {% block topbar_actions %}
-  <form method="POST" action="{{ url_for('add_demo_version', project_id=project.id) }}" style="margin:0">
-    <button type="submit" class="btn btn-secondary btn-sm">
-      <i data-lucide="git-commit-horizontal"></i> Simulate Save
-    </button>
-  </form>
   <button class="btn btn-danger btn-sm"
           onclick="confirmDelete('{{ project.name }}','delete-form-{{ project.id }}')">
     <i data-lucide="trash-2"></i> Delete
@@ -119,7 +114,7 @@
       <div class="empty-state" style="padding:48px 24px">
         <div class="empty-icon"><i data-lucide="git-commit-horizontal"></i></div>
         <h3>No versions yet</h3>
-        <p>Save an FL Studio file in your watched folder, or use "Simulate Save" to add a demo version.</p>
+        <p>Save an FL Studio file in your watched folder while the watcher is active.</p>
       </div>
     {% endif %}
   </div>
