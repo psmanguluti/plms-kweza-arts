@@ -10,6 +10,12 @@
 {% endblock %}
 
 {% block topbar_actions %}
+  <label class="btn btn-primary btn-sm" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;position:relative">
+    <i data-lucide="upload"></i>
+    <span id="upload-btn-text">Upload Version</span>
+    <input type="file" id="upload-version-input" accept=".flp"
+           style="position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%">
+  </label>
   <button class="btn btn-danger btn-sm"
           onclick="confirmDelete('{{ project.name }}','delete-form-{{ project.id }}')">
     <i data-lucide="trash-2"></i> Delete
@@ -89,7 +95,11 @@
               </div>
               <div class="version-meta-row">
                 <span>Patterns</span>
-                <span>{{ version.pattern_count }}</span>
+                <span>{{ version.pattern_count }} pat.</span>
+              </div>
+              <div class="version-meta-row">
+                <i data-lucide="music" style="width:11px;height:11px"></i>
+                <span>{{ version.sample_count if version.sample_count is defined else 0 }} smp.</span>
               </div>
             </div>
             <div class="score-bar-wrap" style="margin-bottom:10px">
@@ -227,7 +237,7 @@
 {% if project.versions|length >= 2 %}
 <div class="chart-grid">
   <div class="chart-wrap">
-    <h4>Quality Score Over Time</h4>
+    <h4>Quality Score <small class="chart-window-note" style="display:none;font-size:.65rem;color:var(--text-3);margin-left:6px;font-weight:400"></small></h4>
     <canvas id="chart-score" height="160"></canvas>
   </div>
   <div class="chart-wrap">
@@ -239,8 +249,12 @@
     <canvas id="chart-tempo" height="160"></canvas>
   </div>
   <div class="chart-wrap">
-    <h4>Pattern Complexity</h4>
+    <h4>Patterns</h4>
     <canvas id="chart-patterns" height="160"></canvas>
+  </div>
+  <div class="chart-wrap" id="chart-samples-wrap">
+    <h4>Sample Channels</h4>
+    <canvas id="chart-samples" height="160"></canvas>
   </div>
 </div>
 {% endif %}
@@ -286,6 +300,57 @@
 
   // Start polling every 4 seconds
   setInterval(poll, 4000);
+})();
+
+/* ── Manual version upload ─────────────────────────────────────
+   Lets the user upload a replaced/updated .flp file at any time,
+   regardless of whether the watcher is running.
+   Sends file bytes to /api/project/<id>/upload_version.
+*/
+(function () {
+  const input     = document.getElementById('upload-version-input');
+  const btnText   = document.getElementById('upload-btn-text');
+  const PROJECT_ID = {{ project.id }};
+  if (!input) return;
+
+  input.addEventListener('change', function () {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.flp')) {
+      showToast('Please select an .flp file.', 'error');
+      return;
+    }
+
+    btnText.textContent = 'Uploading…';
+    input.disabled = true;
+
+    const fd = new FormData();
+    fd.append('flp_file', file);
+
+    fetch(`/api/project/${PROJECT_ID}/upload_version`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: fd
+    })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        showToast(`v${d.version_num} captured — score ${d.quality_score} (${file.name})`, 'success');
+        setTimeout(() => location.reload(), 1600);
+      } else {
+        showToast(d.error || 'Upload failed.', 'error');
+        btnText.textContent = 'Upload Version';
+        input.disabled = false;
+        input.value = '';
+      }
+    })
+    .catch(() => {
+      showToast('Network error during upload.', 'error');
+      btnText.textContent = 'Upload Version';
+      input.disabled = false;
+      input.value = '';
+    });
+  });
 })();
 </script>
 {% endblock %}

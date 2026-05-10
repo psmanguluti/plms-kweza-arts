@@ -15,7 +15,7 @@ class User(db.Model, UserMixin):
     password_hash = db.Column(db.String(256), nullable=False)
     role          = db.Column(db.String(20),  default='producer')
     created_at    = db.Column(db.DateTime,    default=datetime.utcnow)
-    projects      = db.relationship('Project',    backref='owner', lazy=True,
+    projects      = db.relationship('Project',     backref='owner', lazy=True,
                                     cascade='all, delete-orphan')
     settings      = db.relationship('AppSettings', backref='user',  uselist=False,
                                     cascade='all, delete-orphan')
@@ -32,8 +32,12 @@ class Project(db.Model):
     id          = db.Column(db.Integer, primary_key=True)
     user_id     = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     name        = db.Column(db.String(200), nullable=False)
+    # filepath    = server-side copy (inside projects/<id>/)
     filepath    = db.Column(db.String(500), default='')
-    source_path = db.Column(db.String(500), default='')   # real FL Studio path on user's machine
+    # source_path = the REAL path on the user's machine where FL Studio saves
+    # This is what the watcher matches against. Set when project is created
+    # with a typed path, or updated each time a manual upload overwrites it.
+    source_path = db.Column(db.String(500), default='')
     description = db.Column(db.Text,        default='')
     genre       = db.Column(db.String(100), default='')
     created_at  = db.Column(db.DateTime,    default=datetime.utcnow)
@@ -57,6 +61,13 @@ class Project(db.Model):
     def score_class(self):
         s = self.latest_score
         return 'score-high' if s >= 70 else ('score-mid' if s >= 40 else 'score-low')
+
+    @property
+    def watch_filename(self):
+        """Lowercase filename used for fuzzy watcher matching."""
+        import os
+        p = self.source_path or self.filepath
+        return os.path.basename(p).lower() if p else ''
 
 
 class Version(db.Model):

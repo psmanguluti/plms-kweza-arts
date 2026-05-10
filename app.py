@@ -1,4 +1,5 @@
-import os, json, shutil, random, logging, struct, tempfile
+import os, json, shutil, random, logging, struct, math
+from pathlib import Path
 from flask import (Flask, render_template, request, jsonify,
                    redirect, url_for, flash)
 from flask_login import (LoginManager, login_user, logout_user,
@@ -25,57 +26,89 @@ def load_user(uid): return User.query.get(int(uid))
 
 with app.app_context():
     db.create_all()
-    # Migration: add source_path if missing (existing databases)
-    try:
-        from sqlalchemy import text
-        with db.engine.connect() as conn:
-            conn.execute(text("ALTER TABLE projects ADD COLUMN source_path VARCHAR(500) DEFAULT ''"))
-            conn.commit()
-        logging.info('[Migration] Added source_path column.')
-    except Exception:
-        pass  # column already exists
+    # Migrate existing DBs: add source_path and sample_count if missing
+    with db.engine.connect() as conn:
+        for col, tbl, defval in [
+            ('source_path',  'projects',  '""'),
+            ('sample_count', 'versions',  '0'),
+        ]:
+            try:
+                conn.execute(
+                    f'ALTER TABLE {tbl} ADD COLUMN {col} '
+                    f'VARCHAR(500) DEFAULT {defval}'
+                )
+                logging.info(f'[DB] Migrated: {tbl}.{col} added.')
+            except Exception:
+                pass  # Already exists
 
 
-# ── FLP Binary Parser (no external deps) ──────────────────────
+# ── Backup folder ──────────────────────────────────────────────
+def _backup_root() -> str:
+    """
+    Store backups in ~/Documents/PLMS_Backups — well away from FL Studio's
+    own folder so watchdog doesn't pick them up and FL can't see them
+    as project files to scan/crash on.
+    """
+    root = os.path.join(Path.home(), 'Documents', 'PLMS_Backups')
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+# ── FLP Binary Parser ──────────────────────────────────────────
 def _parse_flp_bytes(data: bytes) -> dict:
     """
-    Parse an FL Studio .flp file from raw bytes.
-    Returns dict with tempo, channel_count, pattern_count.
-    Uses the official FLP chunk/event format.
+    Parse FL Studio .flp from raw bytes.
+    Returns tempo, channel_count, pattern_count, sample_count.
+
+    Channel types (event 21, byte value):
+      0 = Sampler / AudioClip  → sample_count
+      1 = Native plugin
+      2 = Layer
+      3 = Instrument plugin
+      4 = Automation clip
+    Types 1, 3 = synth/plugin channels.
     """
     try:
         if data[:4] != b'FLhd':
-            return dict(tempo=120.0, channel_count=0, pattern_count=0)
+            return dict(tempo=120.0, channel_count=0,
+                        pattern_count=0, sample_count=0)
 
-        # Header chunk: FLhd + size(4) + fmt(2) + nTracks(2) + ppq(2)
         hdr_tracks = struct.unpack_from('<H', data, 10)[0]
-
-        # Data chunk starts at byte 14: FLdt + size(4) then events
         if data[14:18] != b'FLdt':
-            return dict(tempo=120.0, channel_count=hdr_tracks, pattern_count=0)
+            return dict(tempo=120.0, channel_count=hdr_tracks,
+                        pattern_count=0, sample_count=0)
 
-        pos = 22
-        end = len(data)
+        pos = 22; end = len(data)
         tempo       = 120.0
         chan_count  = 0
+        sample_count= 0
         pat_nums    = set()
+        pending_type= None   # channel type seen before NewChan fires
 
         while pos < end - 1:
             etype = data[pos]; pos += 1
 
-            if etype < 64:        # BYTE (1 byte value)
-                pos += 1
-            elif etype < 128:     # WORD (2 byte value)
+            if etype < 64:        # BYTE
+                val = data[pos]; pos += 1
+                if etype == 21:   # Channel type flag
+                    pending_type = val
+
+            elif etype < 128:     # WORD
                 pos += 2
-                if etype == 64:   # New channel block
+                if etype == 64:   # NewChan — a new channel block starts
                     chan_count += 1
-            elif etype < 192:     # DWORD (4 byte value)
+                    if pending_type == 0:   # Sampler / AudioClip
+                        sample_count += 1
+                    pending_type = None
+
+            elif etype < 192:     # DWORD
                 val = struct.unpack_from('<I', data, pos)[0]; pos += 4
-                if etype == 156:              # Master tempo (BPM * 1000)
+                if etype == 156:              # Master tempo * 1000
                     tempo = val / 1000.0
                 if etype == 132:              # Playlist item → pattern ref
                     pat_nums.add(val & 0xFFFF)
-            else:                 # TEXT/DATA (varint length prefix)
+
+            else:                 # TEXT / DATA
                 length = 0; shift = 0
                 while pos < end:
                     b = data[pos]; pos += 1
@@ -84,7 +117,6 @@ def _parse_flp_bytes(data: bytes) -> dict:
                     shift += 7
                 pos = min(pos + length, end)
 
-        # If NewChan events didn't fire, fall back to header nTracks
         if chan_count == 0 and hdr_tracks > 0:
             chan_count = hdr_tracks
 
@@ -92,139 +124,186 @@ def _parse_flp_bytes(data: bytes) -> dict:
             tempo         = round(tempo, 1),
             channel_count = chan_count,
             pattern_count = len(pat_nums) if pat_nums else 1,
+            sample_count  = sample_count,
         )
     except Exception as e:
-        logging.warning(f'[FLP Parser] Error: {e}')
-        return dict(tempo=120.0, channel_count=0, pattern_count=0)
+        logging.warning(f'[FLP Parser] {e}')
+        return dict(tempo=120.0, channel_count=0,
+                    pattern_count=0, sample_count=0)
 
 
 def _parse_flp(fp: str) -> dict:
-    """Parse FLP from a file path."""
     try:
         with open(fp, 'rb') as f:
             return _parse_flp_bytes(f.read())
     except Exception as e:
-        logging.warning(f'Failed to read {fp}: {e}')
-        return dict(tempo=120.0, channel_count=0, pattern_count=0)
+        logging.warning(f'[FLP read] {fp}: {e}')
+        return dict(tempo=120.0, channel_count=0,
+                    pattern_count=0, sample_count=0)
 
 
-# ── Watcher callback builder ───────────────────────────────────
-def _make_capture_fn(do_backup: bool, watch_folder: str):
+# ── Watcher callback ───────────────────────────────────────────
+def _make_capture_fn(do_backup: bool):
+    """
+    Three-tier matching:
+      1. Exact match on project.source_path
+      2. Exact match on project.filepath
+      3. Filename-only match (catches path changes)
+    Backups go to ~/Documents/PLMS_Backups/<project_name>/ — NOT inside
+    the FL Studio folder, which was causing FL to crash.
+    """
     def on_flp_change(filepath):
         with app.app_context():
-            fp_lower = filepath.lower()
-            # Tier 1: exact match against server-side copy
+            fp_norm = filepath.lower().replace('\\', '/')
+            fp_base = os.path.basename(fp_norm)
+
             proj = Project.query.filter(
-                db.func.lower(Project.filepath) == fp_lower
+                db.func.lower(Project.source_path) == fp_norm
             ).first()
-            # Tier 2: match against the stored real FL Studio path
             if not proj:
                 proj = Project.query.filter(
-                    db.func.lower(Project.source_path) == fp_lower
+                    db.func.lower(Project.filepath) == fp_norm
                 ).first()
-            # Tier 3: match by filename stem (e.g. "private_school" from any path)
             if not proj:
-                stem = os.path.splitext(os.path.basename(filepath))[0].lower()
-                candidates = Project.query.all()
-                for c in candidates:
-                    c_stem = os.path.splitext(os.path.basename(c.filepath))[0].lower()
-                    if c_stem == stem:
-                        proj = c
-                        # Permanently record the real path so tier 2 matches next time
-                        c.source_path = filepath
-                        db.session.commit()
-                        logging.info(f'[Watcher] Matched "{stem}" → "{c.name}" (source_path saved)')
-                        break
+                for p in Project.query.all():
+                    sp  = (p.source_path or '').lower().replace('\\', '/')
+                    fp2 = (p.filepath    or '').lower().replace('\\', '/')
+                    if (os.path.basename(sp) == fp_base or
+                            os.path.basename(fp2) == fp_base):
+                        proj = p; break
+
             if not proj:
                 logging.info(f'[Watcher] No project matched: {filepath}')
                 return
-            data = _parse_flp(filepath)
-            if data['channel_count'] == 0 and data['pattern_count'] == 0:
-                logging.warning(f'[Watcher] Empty metadata for {filepath}')
-                return
-            v = _build_version(proj, data=data)
-            logging.info(f'[Watcher] Captured v{v.version_num} for "{proj.name}" (score {v.quality_score})')
+
+            # Keep source_path current
+            if (proj.source_path or '').lower().replace('\\', '/') != fp_norm:
+                proj.source_path = filepath
+                db.session.commit()
+
+            parsed = _parse_flp(filepath)
+            v = _build_version(proj, data=parsed)
+            logging.info(
+                f'[Watcher] v{v.version_num} for "{proj.name}" '
+                f'(score {v.quality_score:.1f})'
+            )
+
             if do_backup and os.path.exists(filepath):
-                bdir = os.path.join(os.path.dirname(filepath), 'plms_backups')
+                # Safe backup location — away from FL Studio's folder
+                bdir = os.path.join(_backup_root(), _safe_name(proj.name))
                 os.makedirs(bdir, exist_ok=True)
-                bp = os.path.join(bdir, f'{proj.name}_v{v.version_num}.flp')
+                bp = os.path.join(bdir,
+                    f'{_safe_name(proj.name)}_v{v.version_num:03d}.flp')
                 shutil.copy2(filepath, bp)
                 v.backup_path = bp
                 db.session.commit()
+
     return on_flp_change
+
+
+def _safe_name(s: str) -> str:
+    """Sanitise a project name for use as a folder/file name."""
+    return ''.join(c if c.isalnum() or c in ' _-' else '_' for c in s).strip()
+
+
+def _watched_folders_for_user(user_id):
+    folders = set()
+    s = AppSettings.query.filter_by(user_id=user_id).first()
+    if s and s.watched_folder:
+        f = os.path.abspath(s.watched_folder)
+        if os.path.isdir(f):
+            folders.add(f)
+    for p in Project.query.filter_by(user_id=user_id).all():
+        for path in [p.source_path, p.filepath]:
+            if path:
+                parent = os.path.dirname(os.path.abspath(path))
+                if os.path.isdir(parent):
+                    folders.add(parent)
+    return folders
 
 
 # ── Context processor ──────────────────────────────────────────
 @app.context_processor
 def inject_globals():
-    """
-    Single source of truth for watcher_active in templates.
-    Rule: active = DB flag AND observer thread alive.
-    If DB says ON but thread is dead → try restart → sync DB to result.
-    """
     active = False
     if current_user.is_authenticated:
         s = AppSettings.query.filter_by(user_id=current_user.id).first()
         if s and s.watcher_active:
             if is_watching():
-                active = True          # All good
+                active = True
             else:
-                # Observer died — attempt silent restart
-                logging.warning('[App] Observer not alive — auto-restarting...')
+                logging.warning('[App] Observer dead — restarting...')
                 try:
-                    fn = _make_capture_fn(bool(s.auto_backup), str(s.watched_folder))
-                    start_watcher(str(s.watched_folder), fn)
+                    fn = _make_capture_fn(bool(s.auto_backup))
+                    start_watcher(list(_watched_folders_for_user(current_user.id)), fn)
                     active = True
-                    logging.info('[App] Observer auto-restarted.')
                 except Exception as e:
-                    logging.error(f'[App] Auto-restart failed: {e}')
-                    # Sync DB so badge stops lying
+                    logging.error(f'[App] Restart failed: {e}')
                     s.watcher_active = False
                     db.session.commit()
-                    active = False
-        # If DB says OFF → active stays False, no matter what
     return dict(watcher_active=active)
 
 
-# ── Helpers ────────────────────────────────────────────────────
+# ── Version builder ────────────────────────────────────────────
 def _build_version(project, data=None):
     prev  = project.latest_version
     vnum  = (prev.version_num + 1) if prev else 1
     if data:
-        tempo    = float(data.get('tempo', 120.0))
-        channels = int(data.get('channel_count', 0))
-        patterns = int(data.get('pattern_count', 0))
+        tempo    = float(data.get('tempo',         120.0))
+        channels = int(data.get('channel_count',   0))
+        patterns = int(data.get('pattern_count',   1))
+        samples  = int(data.get('sample_count',    0))
     else:
         base_t   = prev.tempo if prev else random.uniform(80, 140)
         tempo    = round(base_t + random.uniform(-2, 2), 1)
         channels = min((prev.channel_count if prev else 0) + random.randint(0, 3), 32)
         patterns = min((prev.pattern_count if prev else 0) + random.randint(0, 2), 20)
-    vdata   = dict(tempo=tempo, channel_count=channels, pattern_count=patterns, version_num=vnum)
-    score   = ScoringEngine().calculate(vdata)
+        samples  = int(channels * random.uniform(0.3, 0.6))
+
+    vdata  = dict(tempo=tempo, channel_count=channels,
+                  pattern_count=patterns, sample_count=samples,
+                  version_num=vnum)
+    score  = ScoringEngine().calculate(vdata)
     changes = {}
     if prev:
-        changes = ChangeEngine().compute(
-            dict(tempo=prev.tempo, channel_count=prev.channel_count,
-                 pattern_count=prev.pattern_count), vdata)
-    v = Version(project_id=project.id, version_num=vnum, tempo=tempo,
-                channel_count=channels, pattern_count=patterns,
-                quality_score=score, changes_json=json.dumps(changes))
+        prev_data = dict(tempo=prev.tempo, channel_count=prev.channel_count,
+                         pattern_count=prev.pattern_count,
+                         sample_count=getattr(prev, 'sample_count', 0))
+        changes = ChangeEngine().compute(prev_data, vdata)
+
+    v = Version(
+        project_id    = project.id,
+        version_num   = vnum,
+        tempo         = tempo,
+        channel_count = channels,
+        pattern_count = patterns,
+        quality_score = score,
+        changes_json  = json.dumps(changes),
+    )
+    # sample_count stored via setattr in case old DB doesn't have it yet
+    try:
+        v.sample_count = samples
+    except Exception:
+        pass
     db.session.add(v)
     db.session.commit()
     return v
 
 
+# ── Demo loader ────────────────────────────────────────────────
 def _load_demo(uid):
     demos = [
-        dict(name='Summer Anthem',  genre='Afrobeats',
+        dict(name='Summer Anthem',    genre='Afrobeats',
              description='Upbeat track with traditional percussion',
-             vs=[(102,4,3),(102,7,5),(104,10,7),(104,13,9),(105,16,11),(105,18,12)]),
-        dict(name='Midnight Groove', genre='Amapiano',
+             vs=[(102,4,3,2),(102,7,5,3),(104,10,7,5),(104,13,9,6),
+                 (105,16,11,7),(105,18,12,8)]),
+        dict(name='Midnight Groove',  genre='Amapiano',
              description='Deep bass log drum exploration',
-             vs=[(112,3,2),(112,6,4),(113,9,6),(113,12,8)]),
-        dict(name='Afro Fusion Vol.1', genre='Afro-fusion',
+             vs=[(112,3,2,1),(112,6,4,2),(113,9,6,4),(113,12,8,5)]),
+        dict(name='Afro Fusion Vol.1',genre='Afro-fusion',
              description='Traditional meets electronic',
-             vs=[(95,5,4),(95,9,6),(96,14,8),(96,18,11),(97,20,13),(97,22,14),(97,24,15)]),
+             vs=[(95,5,4,2),(95,9,6,4),(96,14,8,6),(96,18,11,8),
+                 (97,20,13,9),(97,22,14,10),(97,24,15,11)]),
     ]
     sc = ScoringEngine(); ch = ChangeEngine()
     for pd in demos:
@@ -233,16 +312,20 @@ def _load_demo(uid):
                        filepath=f"./projects/{pd['name'].lower().replace(' ','_')}.flp")
         db.session.add(proj); db.session.flush()
         prev = None
-        for i, (t, c, p) in enumerate(pd['vs'], 1):
-            vd = dict(tempo=t, channel_count=c, pattern_count=p, version_num=i)
+        for i, (t, c, p, s) in enumerate(pd['vs'], 1):
+            vd = dict(tempo=t, channel_count=c, pattern_count=p,
+                      sample_count=s, version_num=i)
             changes = ch.compute(
                 dict(tempo=prev.tempo, channel_count=prev.channel_count,
-                     pattern_count=prev.pattern_count), vd
+                     pattern_count=prev.pattern_count,
+                     sample_count=getattr(prev, 'sample_count', 0)), vd
             ) if prev else {}
             v = Version(project_id=proj.id, version_num=i, tempo=t,
                         channel_count=c, pattern_count=p,
                         quality_score=sc.calculate(vd),
                         changes_json=json.dumps(changes))
+            try: v.sample_count = s
+            except Exception: pass
             db.session.add(v); prev = v
     db.session.commit()
 
@@ -275,11 +358,11 @@ def auth_register():
         pw    = request.form.get('password', '')
         cpw   = request.form.get('confirm_password', '')
         errs  = []
-        if len(uname) < 3:                                errs.append('Username must be at least 3 characters.')
-        if '@' not in email:                              errs.append('A valid email address is required.')
-        if len(pw) < 6:                                   errs.append('Password must be at least 6 characters.')
+        if len(uname) < 3:                                errs.append('Username ≥ 3 characters.')
+        if '@' not in email:                              errs.append('Valid email required.')
+        if len(pw) < 6:                                   errs.append('Password ≥ 6 characters.')
         if pw != cpw:                                     errs.append('Passwords do not match.')
-        if User.query.filter_by(username=uname).first():  errs.append('Username already taken.')
+        if User.query.filter_by(username=uname).first():  errs.append('Username taken.')
         if User.query.filter_by(email=email).first():     errs.append('Email already registered.')
         if errs:
             for e in errs: flash(e, 'error')
@@ -311,8 +394,7 @@ def dashboard():
     avg      = round(sum(scored) / len(scored), 1) if scored else 0.0
     return render_template('dashboard.html', projects=projects,
                            total_projects=len(projects),
-                           total_versions=total_v,
-                           avg_score=avg)
+                           total_versions=total_v, avg_score=avg)
 
 
 # ── Projects ───────────────────────────────────────────────────
@@ -324,33 +406,32 @@ def create_project():
         flash('Project name is required.', 'error')
         return redirect(url_for('dashboard'))
 
-    filepath = request.form.get('filepath', '').strip()
+    source_path = request.form.get('source_path', '').strip()
     proj = Project(user_id=current_user.id, name=name,
                    description=request.form.get('description', '').strip(),
-                   filepath=filepath,
-                   source_path=filepath,   # remember the original FL Studio path
+                   source_path=source_path,
                    genre=request.form.get('genre', '').strip())
     db.session.add(proj); db.session.commit()
 
-    # Save uploaded FLP file and capture initial version
     flp_file = request.files.get('flp_file')
     if flp_file and flp_file.filename.lower().endswith('.flp'):
-        # Save to projects folder so watcher can track it
-        save_dir = os.path.join('projects', str(proj.id))
+        save_dir  = os.path.join('projects', str(proj.id))
         os.makedirs(save_dir, exist_ok=True)
         save_path = os.path.join(save_dir, flp_file.filename)
         flp_file.save(save_path)
-        # Update the project filepath to the saved location
         proj.filepath = save_path
+        if not proj.source_path:
+            proj.source_path = flp_file.filename
         db.session.commit()
-        # Parse and create initial version
         data = _parse_flp(save_path)
         _build_version(proj, data=data)
-        flash(f'Project "{name}" created — initial analytics captured from {flp_file.filename}.', 'success')
-    elif filepath and os.path.isfile(filepath):
-        data = _parse_flp(filepath)
-        _build_version(proj, data=data)
-        flash(f'Project "{name}" created with initial analytics.', 'success')
+        flash(f'Project "{name}" created — initial analytics captured.', 'success')
+        s = AppSettings.query.filter_by(user_id=current_user.id).first()
+        if s and s.watcher_active and is_watching():
+            try:
+                fn = _make_capture_fn(bool(s.auto_backup))
+                start_watcher(list(_watched_folders_for_user(current_user.id)), fn)
+            except Exception: pass
     else:
         flash(f'Project "{name}" created.', 'success')
 
@@ -364,12 +445,14 @@ def project_detail(project_id):
                                     user_id=current_user.id).first_or_404()
     preds = PredictionEngine().predict_all(proj.versions) \
             if len(proj.versions) >= 3 else {}
+    # Chart uses ALL versions — JS windowing handles the display
     chart = dict(
-        labels  =[f'v{v.version_num}' for v in proj.versions],
-        scores  =[v.quality_score     for v in proj.versions],
-        channels=[v.channel_count     for v in proj.versions],
-        tempos  =[v.tempo             for v in proj.versions],
-        patterns=[v.pattern_count     for v in proj.versions],
+        labels  =[f'v{v.version_num}'                         for v in proj.versions],
+        scores  =[v.quality_score                              for v in proj.versions],
+        channels=[v.channel_count                              for v in proj.versions],
+        tempos  =[v.tempo                                      for v in proj.versions],
+        patterns=[v.pattern_count                              for v in proj.versions],
+        samples =[getattr(v, 'sample_count', 0)               for v in proj.versions],
     )
     return render_template('project.html', project=proj,
                            predictions=preds,
@@ -387,68 +470,71 @@ def delete_project(project_id):
     return redirect(url_for('dashboard'))
 
 
-# ── API: Analyse FLP (file upload) ────────────────────────────
+# ── API: Analyse FLP (upload) ─────────────────────────────────
 @app.route('/api/analyze_flp', methods=['POST'])
 @login_required
 def api_analyze_flp():
-    """
-    Accepts a real file upload (multipart/form-data, field name 'flp_file').
-    Parses the FLP bytes in-memory — no path dependency, works from any browser.
-    Returns tempo, channel_count, pattern_count, quality_score, size_kb.
-    """
     flp_file = request.files.get('flp_file')
     if not flp_file:
         return jsonify(ok=False, error='No file uploaded.')
     if not flp_file.filename.lower().endswith('.flp'):
         return jsonify(ok=False, error='Only .flp files are supported.')
-
     raw = flp_file.read()
     if len(raw) < 22:
-        return jsonify(ok=False, error='File too small — not a valid .flp.')
-
-    parsed = _parse_flp_bytes(raw)
+        return jsonify(ok=False, error='File too small.')
+    parsed  = _parse_flp_bytes(raw)
     size_kb = round(len(raw) / 1024, 1)
-    vdata   = dict(**parsed, version_num=1)
-    score   = ScoringEngine().calculate(vdata)
+    score   = ScoringEngine().calculate(dict(**parsed, version_num=1))
+    return jsonify(ok=True, filename=flp_file.filename,
+                   size_kb=size_kb, quality_score=round(score, 1), **parsed)
 
-    return jsonify(
-        ok            = True,
-        tempo         = parsed['tempo'],
-        channel_count = parsed['channel_count'],
-        pattern_count = parsed['pattern_count'],
-        quality_score = round(score, 1),
-        size_kb       = size_kb,
-        filename      = flp_file.filename,
-    )
+
+# ── API: Manual version upload ────────────────────────────────
+@app.route('/api/project/<int:project_id>/upload_version', methods=['POST'])
+@login_required
+def api_upload_version(project_id):
+    proj     = Project.query.filter_by(id=project_id,
+                                       user_id=current_user.id).first_or_404()
+    flp_file = request.files.get('flp_file')
+    if not flp_file:
+        return jsonify(ok=False, error='No file uploaded.')
+    if not flp_file.filename.lower().endswith('.flp'):
+        return jsonify(ok=False, error='Only .flp files are supported.')
+    raw = flp_file.read()
+    if len(raw) < 22:
+        return jsonify(ok=False, error='File too small.')
+    parsed = _parse_flp_bytes(raw)
+    if proj.filepath and os.path.isdir(os.path.dirname(proj.filepath or '.')):
+        with open(proj.filepath, 'wb') as f: f.write(raw)
+    else:
+        save_dir  = os.path.join('projects', str(proj.id))
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, flp_file.filename)
+        with open(save_path, 'wb') as f: f.write(raw)
+        proj.filepath = save_path
+        db.session.commit()
+    v = _build_version(proj, data=parsed)
+    return jsonify(ok=True, version_num=v.version_num,
+                   quality_score=round(v.quality_score, 1), **parsed)
 
 
 # ── API: Watcher status ───────────────────────────────────────
 @app.route('/api/watcher_status')
 @login_required
 def api_watcher_status():
-    """
-    True watcher state: both DB flag AND observer thread must be alive.
-    This is the single source of truth the badge JS polls.
-    """
     s = AppSettings.query.filter_by(user_id=current_user.id).first()
-    db_on   = bool(s and s.watcher_active)
-    proc_on = is_watching()
-
-    # DB says on but process died — reflect the reality
-    if db_on and not proc_on:
-        # Try a silent restart before giving up
+    db_on = bool(s and s.watcher_active)
+    live  = is_watching()
+    if db_on and not live:
         try:
-            fn = _make_capture_fn(bool(s.auto_backup), str(s.watched_folder))
-            start_watcher(str(s.watched_folder), fn)
-            proc_on = True
+            fn = _make_capture_fn(bool(s.auto_backup))
+            start_watcher(list(_watched_folders_for_user(current_user.id)), fn)
+            live = True
         except Exception:
-            # Sync DB so it stops lying
             s.watcher_active = False
             db.session.commit()
             db_on = False
-
-    active = db_on and proc_on
-    return jsonify(active=active)
+    return jsonify(active=(db_on and live))
 
 
 # ── API: Rollback ─────────────────────────────────────────────
@@ -460,26 +546,43 @@ def api_rollback():
                                    user_id=current_user.id).first_or_404()
     ver  = Version.query.filter_by(project_id=proj.id,
                                    version_num=data.get('version_num')).first_or_404()
-    msg = f'Rolled back to version {ver.version_num}.'
-    if ver.backup_path and os.path.exists(ver.backup_path):
+
+    if not ver.backup_path or not os.path.exists(ver.backup_path):
+        return jsonify(success=False,
+                       message=f'No backup file found for v{ver.version_num}. '
+                               f'Enable auto-backup in settings to capture backups.')
+
+    restored = []
+    # 1. Restore to server-side copy
+    if proj.filepath and os.path.isdir(os.path.dirname(proj.filepath or '.')):
         shutil.copy2(ver.backup_path, proj.filepath)
+        restored.append('server copy')
+
+    # 2. Restore to the REAL FL Studio file (source_path)
+    if proj.source_path and os.path.exists(os.path.dirname(proj.source_path or '.')):
+        shutil.copy2(ver.backup_path, proj.source_path)
+        restored.append('FL Studio file')
+
+    if restored:
+        return jsonify(success=True,
+                       message=f'Rolled back to v{ver.version_num}. '
+                               f'Restored: {", ".join(restored)}. '
+                               f'Reopen the project in FL Studio to see the changes.')
     else:
-        msg += ' (demo mode — no backup file on disk)'
-    return jsonify(success=True, message=msg)
+        return jsonify(success=False,
+                       message='Backup found but could not locate project file to restore.')
 
 
-# ── API: Latest version poll ──────────────────────────────────
+# ── API: Latest version ───────────────────────────────────────
 @app.route('/api/project/<int:project_id>/latest')
 @login_required
 def api_latest(project_id):
     proj = Project.query.filter_by(id=project_id,
                                    user_id=current_user.id).first_or_404()
     lv   = proj.latest_version
-    return jsonify({
-        'version_count':  proj.version_count,
-        'latest_version': lv.version_num   if lv else 0,
-        'latest_score':   lv.quality_score if lv else 0,
-    })
+    return jsonify(version_count=proj.version_count,
+                   latest_version=lv.version_num   if lv else 0,
+                   latest_score  =lv.quality_score if lv else 0)
 
 
 # ── Settings ──────────────────────────────────────────────────
@@ -493,38 +596,34 @@ def settings():
 
     if request.method == 'POST':
         action = request.form.get('action', '')
-
         if action == 'general':
             s.watched_folder        = request.form.get('watched_folder', './projects')
             s.notifications_enabled = 'notifications_enabled' in request.form
             s.auto_backup           = 'auto_backup' in request.form
             db.session.commit()
-            flash('General settings saved.', 'success')
-
+            flash('Settings saved.', 'success')
         elif action == 'scoring':
-            s.score_weight_tempo    = float(request.form.get('w_tempo',    25))
-            s.score_weight_channels = float(request.form.get('w_channels', 35))
-            s.score_weight_patterns = float(request.form.get('w_patterns', 25))
-            s.score_weight_maturity = float(request.form.get('w_maturity', 15))
             db.session.commit()
-            flash('Scoring weights updated.', 'success')
-
+            flash('Scoring updated.', 'success')
         elif action == 'toggle_watcher':
             if is_watching():
-                stop_watcher()
-                s.watcher_active = False
+                stop_watcher(); s.watcher_active = False
                 flash('Watcher stopped.', 'success')
             else:
-                fn = _make_capture_fn(bool(s.auto_backup), str(s.watched_folder))
-                start_watcher(str(s.watched_folder), fn)
-                s.watcher_active = True
-                flash('Watcher started. Real-time capture active.', 'success')
+                fn      = _make_capture_fn(bool(s.auto_backup))
+                folders = _watched_folders_for_user(current_user.id)
+                if not folders:
+                    flash('No valid folders to watch. '
+                          'Add a project with a known file path first.', 'error')
+                else:
+                    start_watcher(list(folders), fn)
+                    s.watcher_active = True
+                    flash(f'Watcher started — monitoring {len(folders)} folder(s).'
+                          f' Backups save to ~/Documents/PLMS_Backups.', 'success')
             db.session.commit()
-
         elif action == 'demo':
             _load_demo(current_user.id)
             flash('Demo projects loaded.', 'success')
-
         elif action == 'password':
             cur = request.form.get('current_password', '')
             new = request.form.get('new_password',     '')
@@ -532,12 +631,15 @@ def settings():
                 current_user.set_password(new); db.session.commit()
                 flash('Password updated.', 'success')
             else:
-                flash('Incorrect password or new password too short.', 'error')
-
+                flash('Incorrect password or too short.', 'error')
         return redirect(url_for('settings'))
 
-    db_size = os.path.getsize('plms.db') // 1024 if os.path.exists('plms.db') else 0
-    return render_template('settings.html', s=s, db_size=db_size)
+    db_size      = os.path.getsize('plms.db') // 1024 if os.path.exists('plms.db') else 0
+    backup_root  = _backup_root()
+    watched_flds = _watched_folders_for_user(current_user.id) if s.watcher_active else set()
+    return render_template('settings.html', s=s, db_size=db_size,
+                           backup_root=backup_root,
+                           watched_folders=watched_flds)
 
 
 if __name__ == '__main__':
