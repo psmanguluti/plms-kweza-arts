@@ -63,7 +63,7 @@
       <a href="{{ url_for('project_detail', project_id=proj.id) }}" class="project-card">
         <div class="project-card-header">
           <div class="project-card-meta">
-            <div class="project-card-name">{{ proj.name }}</div>
+            <div class="project-card-name">{{ proj.name }}{% if proj.is_demo %} <span class="badge badge-gold" style="font-size:.6rem;vertical-align:middle">DEMO</span>{% endif %}</div>
             <div class="project-card-genre">
               {% if proj.genre %}
                 <i data-lucide="music" style="width:11px;height:11px;display:inline;vertical-align:middle;"></i>
@@ -147,6 +147,7 @@
           <i data-lucide="plus-circle"></i> Create a Project
         </button>
         <form method="POST" action="{{ url_for('settings') }}" style="margin:0">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <input type="hidden" name="action" value="demo">
           <button type="submit" class="btn btn-secondary">
             <i data-lucide="sparkles"></i> Load Demo Data

@@ -19,6 +19,7 @@
     </div>
     <div class="settings-section-body">
       <form method="POST" action="{{ url_for('settings') }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="general">
         <div class="setting-row">
           <label>Watched Folder Path</label>
@@ -83,6 +84,7 @@
         </p>
       </div>
       <form method="POST" action="{{ url_for('settings') }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="toggle_watcher">
         <button type="submit"
                 class="btn {% if watcher_active %}btn-danger{% else %}btn-primary{% endif %} btn-sm">
@@ -107,6 +109,7 @@
     </div>
     <div class="settings-section-body">
       <form method="POST" action="{{ url_for('settings') }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="scoring">
         <div class="slider-row">
           <label>
@@ -137,6 +140,15 @@
         </div>
         <div class="slider-row">
           <label>
+            Sample diversity
+            <span id="val-w_samples">{{ (s.score_weight_samples if s.score_weight_samples is not none else 15)|round(0)|int }}</span>
+          </label>
+          <input type="range" id="w_samples" name="w_samples"
+                 min="0" max="60" step="1"
+                 value="{{ (s.score_weight_samples if s.score_weight_samples is not none else 15)|round(0)|int }}">
+        </div>
+        <div class="slider-row">
+          <label>
             Maturity
             <span id="val-w_maturity">{{ s.score_weight_maturity|round(0)|int }}</span>
           </label>
@@ -147,6 +159,9 @@
         <p class="text-xs text-muted" style="margin:10px 0 16px">
           Weights do not need to sum to 100. Each dimension is scored proportionally.
         </p>
+        <label style="display:flex;gap:8px;align-items:center;font-size:.82rem;color:var(--text-2);margin-bottom:14px">
+          <input type="checkbox" name="rescore" value="1"> Also re-score existing versions with these weights
+        </label>
         <button type="submit" class="btn btn-primary btn-sm">
           <i data-lucide="save"></i> Save Weights
         </button>
@@ -177,6 +192,7 @@
         </div>
       </div>
       <form method="POST" action="{{ url_for('settings') }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="password">
         <div class="setting-row">
           <label>Current Password</label>
@@ -220,14 +236,22 @@
         </div>
       </div>
       <p class="text-sm text-secondary" style="margin-bottom:16px;line-height:1.6">
-        Load a set of realistic demo projects to explore the system without connecting FL Studio.
+        Load sample projects (clearly marked DEMO, no files, no rollback) to explore the system without FL Studio.
       </p>
       <form method="POST" action="{{ url_for('settings') }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="demo">
         <button type="submit" class="btn btn-secondary btn-sm">
           <i data-lucide="sparkles"></i> Load Demo Projects
         </button>
       </form>
+      {% if has_demo %}
+      <form method="POST" action="{{ url_for('settings') }}" style="margin-top:10px">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="remove_demo">
+        <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i> Remove Demo Projects</button>
+      </form>
+      {% endif %}
     </div>
   </div>
 

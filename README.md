@@ -17,13 +17,19 @@ Built as an undergraduate final year project for **Kweza Arts**, a creative musi
 | Feature | Description |
 |---|---|
 | **Version Capture** | Automatically snapshots every FL Studio `.flp` save with timestamp and metadata |
-| **Change Engine** | Computes measurable differences in tempo, channels, and patterns between versions |
+| **Change Engine** | Computes measurable differences in tempo, channels, patterns, samples, playlist clips/tracks, arrangement length and structural complexity |
+| **Compare Any Two Versions** | Pick any two versions: metric table, pattern/track additions and removals, score breakdown side by side |
+| **Version Notes** | Annotate any version; notes are searchable and exported |
+| **Search & Filter** | Filter history by text, `v3`, score range, date range, origin, has-note |
+| **Export** | CSV and PDF version reports (respect the active filters) |
+| **Notifications** | In-app toasts for capture, score, prediction, rollback and any failure |
+| **Backup Integrity** | SHA-256 per capture and per backup; verified before every rollback; one-click *Verify backups* |
 | **Quality Scoring** | Assigns a 0–100 score to each version using configurable production metrics |
 | **Prediction Engine** | Uses linear regression to forecast how a track will evolve across future versions |
 | **Version Timeline** | Horizontal scrollable DAW-inspired timeline showing every saved state |
-| **Safe Rollback** | Restore any previous version of a project with one click |
+| **Safe Rollback** | Confirmation modal, safety copy of the current file, checksum-verified restore, recorded as a new version, full audit trail |
 | **Authentication** | Secure multi-user login with private workspaces per producer |
-| **Demo Mode** | Simulate saves and load demo projects without an FL Studio installation |
+| **Demo Mode** | Sample projects clearly marked DEMO (no files, no rollback/upload); removable in Settings |
 
 ---
 
@@ -31,11 +37,12 @@ Built as an undergraduate final year project for **Kweza Arts**, a creative musi
 
 - **Backend** — Python 3.10+, Flask 3, SQLAlchemy, Flask-Login
 - **Database** — SQLite (zero-config, file-based)
-- **Analysis** — NumPy, scikit-learn (linear regression)
+- **Analysis** — NumPy (least-squares trend, R²), built-in FLP event parser (`flp_parser.py`)
 - **FLP Parsing** — pyflp (reads FL Studio project metadata)
 - **File Watcher** — watchdog (real-time `.flp` save detection)
 - **Frontend** — Jinja2 templates, Chart.js, Lucide Icons
-- **Auth** — Werkzeug password hashing, Flask-Login sessions
+- **Auth & security** — Werkzeug password hashing, Flask-Login sessions, Flask-WTF CSRF protection
+- **Reports** — ReportLab (PDF)
 
 ---
 
@@ -213,3 +220,41 @@ This project was developed for academic purposes at the University of Greenwich 
 ---
 
 *Every track tells a story. PLMS helps you understand it.*
+
+
+---
+
+## Configuration
+
+| Environment variable | Purpose | Default |
+|---|---|---|
+| `PLMS_SECRET_KEY` | Flask session/CSRF secret | random key generated once and stored in `instance/secret_key` |
+| `PLMS_DATABASE_URI` | SQLAlchemy URI | `sqlite:///plms.db` (in `instance/`) |
+| `PLMS_BACKUP_ROOT` | Where version backups are written | `~/Documents/PLMS_Backups` |
+
+Existing databases are upgraded automatically on start-up (new columns are added; nothing is deleted).
+
+## Tests and benchmark
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest tests -q            # 66 tests: parser, engines, API, rollback, security, migration
+python benchmarks/bench.py           # NFR-01 (capture < 2 s) and NFR-06 (500+ versions) evidence
+```
+
+`samples/` holds three real `.flp` files used as test fixtures.
+
+## Requirement → code → test
+
+| Requirement | Where | Tests |
+|---|---|---|
+| FR-01..05 capture & history | `app._capture_version`, `watcher.py`, `flp_parser.py` | `test_app.py` capture, watcher, dedupe |
+| FR-06..10 compare, arrangement, complexity | `ChangeEngine.compare`, `/api/project/<id>/compare`, `structural_complexity` | `test_parser_engines.py`, `test_app.py::test_compare_*` |
+| FR-11..14 scoring, breakdown | `ScoringEngine`, Settings → Scoring | `test_scoring_*`, `test_breakdown_sums_to_total` |
+| FR-15..18 prediction, patterns | `PredictionEngine`, `PatternAnalyzer` | `test_prediction_*`, `test_patterns_*` |
+| FR-19..22 timeline, compare view | `project.html` | `test_project_page_shows_*` |
+| FR-23..26 rollback | `/api/rollback`, `RollbackEvent` | `test_rollback_*` |
+| FR-27..31 notifications | `notify()`, `/api/notifications` | `test_notifications_*` |
+| Annotation / search / export | `/api/version/<id>/notes`, `_filter_versions`, `export_csv/pdf` | `test_notes_*`, `test_filtering`, `test_*_export` |
+| NFR-01, NFR-06 performance | `benchmarks/bench.py` | `test_performance.py` |
+| NFR-04/05/11/12 security & integrity | CSRF, SHA-256, ownership checks | `test_users_cannot_touch_*`, `test_csrf_*`, `test_rollback_aborts_*`, `test_verify_*` |

@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>{% block title %}PLMS{% endblock %} · Kweza Arts</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
@@ -158,7 +159,7 @@
     }
   </style>
 </head>
-<body>
+<body data-auth="{{ 1 if current_user.is_authenticated else 0 }}">
 {% with messages = get_flashed_messages(with_categories=true) %}
   {% for category, message in messages %}
     <span data-flash="{{ message }}" data-flash-type="{{ category }}" hidden></span>
@@ -257,6 +258,7 @@
           action="{{ url_for('create_project') }}"
           enctype="multipart/form-data"
           id="new-project-form">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
       <div class="modal-form-fields">
 
