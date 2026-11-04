@@ -1,3 +1,4 @@
+from markupsafe import Markup
 import os, io, csv, json, shutil, hashlib, logging, threading, time, secrets, re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,7 +15,7 @@ from werkzeug.utils import secure_filename
 from models  import (db, User, Project, Version, AppSettings,
                      RollbackEvent, Notification)
 from engines import (ChangeEngine, ScoringEngine, PredictionEngine,
-                     PatternAnalyzer, structural_complexity)
+                     PatternAnalyzer, structural_complexity, progress_indicators)
 from flp_parser import parse_flp_bytes, parse_flp
 from watcher import start_watcher, stop_watcher, is_watching
 
@@ -61,13 +62,16 @@ def load_user(uid): return db.session.get(User, int(uid))
 # ── Schema migration (SQLAlchemy 2 compatible) ─────────────────
 NEW_COLUMNS = {
     'projects': [('source_path', 'VARCHAR(500)', "''"), ('is_demo', 'BOOLEAN', '0')],
-    'versions': [('sample_count', 'INTEGER', '0'), ('playlist_items', 'INTEGER', '0'),
-                 ('tracks_used', 'INTEGER', '0'), ('arrangement_bars', 'FLOAT', '0'),
-                 ('complexity', 'FLOAT', '0'), ('arrangement_json', 'TEXT', "''"),
+    'versions': [('sample_count', 'INTEGER', 'NULL'), ('playlist_items', 'INTEGER', 'NULL'),
+                 ('tracks_used', 'INTEGER', 'NULL'), ('arrangement_bars', 'FLOAT', 'NULL'),
+                 ('complexity', 'FLOAT', 'NULL'), ('arrangement_json', 'TEXT', "''"),
+                 ('parse_ok', 'BOOLEAN', '1'), ('parse_error', 'VARCHAR(200)', "''"),
+                 ('plugins_json', 'TEXT', "''"),
                  ('breakdown_json', 'TEXT', "''"), ('file_hash', 'VARCHAR(64)', "''"),
                  ('backup_hash', 'VARCHAR(64)', "''"), ('origin', 'VARCHAR(20)', "'capture'"),
                  ('restored_from', 'INTEGER', 'NULL')],
-    'app_settings': [('score_weight_samples', 'FLOAT', '15')],
+    'app_settings': [('score_weight_samples', 'FLOAT', '15'), ('show_experimental', 'BOOLEAN', '0')],
+    'rollback_events': [('restored_path', 'VARCHAR(500)', "''"), ('restored_hash', 'VARCHAR(64)', "''")],
 }
 
 
@@ -96,9 +100,6 @@ def _migrate():
             p.is_demo = True
             for v in p.versions:
                 v.origin = 'demo'
-    # back-fill complexity for versions captured before it existed
-    for v in Version.query.filter((Version.complexity == None) | (Version.complexity == 0)).all():  # noqa: E711
-        v.complexity = structural_complexity(v.metrics())
     db.session.commit()
 
 
@@ -173,6 +174,13 @@ def _user_settings(user_id) -> AppSettings:
     return s
 
 
+def _show_experimental(user_id) -> bool:
+    """Quality scoring and prediction are outside the agreed specification (Section 6 of the
+    review). They are hidden unless the user switches them on in Settings."""
+    s = AppSettings.query.filter_by(user_id=user_id).first()
+    return bool(s and s.show_experimental)
+
+
 def _scorer_for(user_id) -> ScoringEngine:
     return ScoringEngine(_user_settings(user_id).weights)
 
@@ -203,7 +211,14 @@ def notify(user_id, project_id, kind, message, level='success'):
 
 def _announce_capture(proj, v):
     label = {'upload': 'uploaded', 'rollback': 'restored'}.get(v.origin, 'captured')
-    notify(proj.user_id, proj.id, 'capture', f'"{proj.name}": v{v.version_num} {label}.')
+    if not v.available:
+        notify(proj.user_id, proj.id, 'capture',
+               f'"{proj.name}": v{v.version_num} {label}, but its details are unavailable '
+               f'({v.parse_error or "file could not be read"}). It is saved and can be restored.', 'info')
+    else:
+        notify(proj.user_id, proj.id, 'capture', f'"{proj.name}": v{v.version_num} {label}.')
+    if not _show_experimental(proj.user_id) or not v.available or v.quality_score is None:
+        return
     notify(proj.user_id, proj.id, 'score',
            f'"{proj.name}": quality score for v{v.version_num} is {v.quality_score:.1f}.', 'info')
     versions = Version.query.filter_by(project_id=proj.id).order_by(Version.version_num).all()
@@ -217,37 +232,40 @@ def _announce_capture(proj, v):
 
 # ── Version creation ───────────────────────────────────────────
 _capture_lock    = threading.RLock()     # watcher thread + request threads (NFR-13)
-_recent_restores = {}                    # normalised path -> (sha256, timestamp)
 
 
 def _build_version(project, data, file_hash='', origin='capture', restored_from=None, notes=''):
+    """Create an immutable version row. When the file could not be parsed (parse_ok False)
+    every property is stored as NULL ("unavailable"): no defaults are invented."""
     prev  = _latest_version(project.id)
     vnum  = (prev.version_num + 1) if prev else 1
-    scorer = _scorer_for(project.user_id)
+    ok    = data.get('parse_ok', True)
 
-    arr = data.get('arrangement') or {}
-    has_arr = bool(data.get('playlist_items'))
-    vdata = dict(tempo=float(data.get('tempo', 120.0)),
-                 channel_count=int(data.get('channel_count', 0)),
-                 pattern_count=int(data.get('pattern_count', 1)),
-                 sample_count=int(data.get('sample_count', 0) or 0),
-                 playlist_items=int(data.get('playlist_items', 0) or 0),
-                 tracks_used=int(data.get('tracks_used', 0) or 0),
-                 arrangement_bars=float(data.get('arrangement_bars', 0.0) or 0.0),
-                 version_num=vnum)
-    bd = scorer.breakdown(vdata)
-    changes = {}
-    if prev:
-        changes = ChangeEngine().compute(prev.metrics(), {**vdata, 'has_arrangement': has_arr,
-                                                          'arrangement': arr})
-    v = Version(project_id=project.id, version_num=vnum,
-                tempo=vdata['tempo'], channel_count=vdata['channel_count'],
-                pattern_count=vdata['pattern_count'], sample_count=vdata['sample_count'],
-                playlist_items=vdata['playlist_items'], tracks_used=vdata['tracks_used'],
-                arrangement_bars=vdata['arrangement_bars'],
-                complexity=structural_complexity(vdata),
+    arr = (data.get('arrangement') or {}) if ok else {}
+    has_arr = bool(ok and data.get('playlist_items'))
+    props = {k: (data.get(k) if ok else None) for k in
+             ('tempo', 'channel_count', 'pattern_count', 'sample_count',
+              'playlist_items', 'tracks_used', 'arrangement_bars')}
+    plugins = data.get('plugins') if ok else None
+
+    vdata = dict(props, version_num=vnum, available=bool(ok), plugins=plugins,
+                 has_arrangement=has_arr, arrangement=arr)
+    # Experimental score: only when the three scored properties are all known
+    score, bd = None, None
+    if ok and None not in (props['tempo'], props['channel_count'], props['pattern_count']):
+        bd = _scorer_for(project.user_id).breakdown(dict(props, sample_count=props['sample_count'] or 0,
+                                                         version_num=vnum))
+        score = bd['total']
+    changes = ChangeEngine().compute(prev.metrics(), vdata) if prev else {}
+    v = Version(project_id=project.id, version_num=vnum, parse_ok=bool(ok),
+                parse_error=data.get('parse_error', '') if not ok else '',
+                tempo=props['tempo'], channel_count=props['channel_count'],
+                pattern_count=props['pattern_count'], sample_count=props['sample_count'],
+                playlist_items=props['playlist_items'], tracks_used=props['tracks_used'],
+                arrangement_bars=props['arrangement_bars'],
+                plugins_json=json.dumps(plugins) if plugins is not None else '',
                 arrangement_json=json.dumps(arr) if (has_arr and arr) else '',
-                quality_score=bd['total'], breakdown_json=json.dumps(bd),
+                quality_score=score, breakdown_json=json.dumps(bd) if bd else '',
                 changes_json=json.dumps(changes), file_hash=file_hash,
                 origin=origin, restored_from=restored_from, notes=notes)
     db.session.add(v)
@@ -293,14 +311,22 @@ def _verify_backup(v) -> str:
     return 'ok' if _sha256_file(v.backup_path) == expected else 'corrupt'
 
 
-def _read_stable(path, tries=4):
+def _read_stable(path, tries=5):
+    """Read a file, retrying when it is locked or changes while it is being read."""
     last = None
     for _ in range(tries):
         try:
+            before = os.stat(path)
             with open(path, 'rb') as f:
-                return f.read()
+                raw = f.read()
+            after = os.stat(path)
+            if (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns) \
+                    and len(raw) == after.st_size:
+                return raw
+            last = IOError(f'{path} changed while it was being read')
         except OSError as e:
-            last = e; time.sleep(0.4)
+            last = e
+        time.sleep(0.4)
     raise last
 
 
@@ -326,9 +352,6 @@ def _make_capture_fn(do_backup: bool):
                     proj.source_path = filepath
                     db.session.commit()
                 raw = _read_stable(filepath)
-                rr = _recent_restores.get(fp_norm)
-                if rr and rr[0] == _sha256_bytes(raw) and time.time() - rr[1] < 60:
-                    return                                    # echo of our own rollback
                 v = _capture_version(proj, raw, 'capture', do_backup=do_backup, dedupe=True)
                 if v:
                     logging.info(f'[Watcher] v{v.version_num} for "{proj.name}" '
@@ -375,7 +398,8 @@ def inject_globals():
                     logging.error(f'[App] Restart failed: {e}')
                     s.watcher_active = False
                     db.session.commit()
-    return dict(watcher_active=active)
+    exp = _show_experimental(current_user.id) if current_user.is_authenticated else False
+    return dict(watcher_active=active, show_experimental=exp)
 
 
 # ── Demo data (clearly flagged, never mixed with real behaviour) ──
@@ -461,7 +485,7 @@ def dashboard():
     projects = Project.query.filter_by(user_id=current_user.id)\
                    .order_by(Project.created_at.desc()).all()
     total_v  = sum(p.version_count for p in projects)
-    scored   = [p.latest_score for p in projects if p.latest_score > 0]
+    scored   = [p.latest_score for p in projects if p.latest_score and p.latest_score > 0]
     avg      = round(sum(scored) / len(scored), 1) if scored else 0.0
     return render_template('dashboard.html', projects=projects,
                            total_projects=len(projects),
@@ -469,6 +493,20 @@ def dashboard():
 
 
 # ── Projects ───────────────────────────────────────────────────
+@app.template_filter('basename')
+def _basename_filter(path):
+    return os.path.basename(str(path).replace('\\', '/'))
+
+
+def _validate_flp_path(path: str):
+    """Return a problem description, or None when `path` is an existing .flp file."""
+    if not path.lower().endswith('.flp'):
+        return 'The file path must end in .flp (an FL Studio project file).'
+    if not os.path.isfile(path):
+        return f'No file exists at "{path}". Check the path, or leave it blank and upload the file instead.'
+    return None
+
+
 @app.route('/project/new', methods=['POST'])
 @login_required
 def create_project():
@@ -478,6 +516,11 @@ def create_project():
         return redirect(url_for('dashboard'))
 
     source_path = request.form.get('source_path', '').strip()
+    if source_path:
+        problem = _validate_flp_path(source_path)
+        if problem:
+            flash(problem, 'error')
+            return redirect(url_for('dashboard'))
     proj = Project(user_id=current_user.id, name=name,
                    description=request.form.get('description', '').strip(),
                    source_path=source_path,
@@ -541,23 +584,37 @@ def _filter_versions(versions, args):
 
 
 def _breakdown_for(v, user_id):
+    if not v.available or None in (v.tempo, v.channel_count, v.pattern_count):
+        return None
     bd = v.breakdown
     if bd:
         return dict(**bd, approximate=False)
-    bd = _scorer_for(user_id).breakdown(v.metrics())      # legacy versions: recomputed
+    bd = _scorer_for(user_id).breakdown(dict(v.metrics(), sample_count=v.sample_total or 0))
     return dict(**bd, approximate=True)
+
+
+def _latest_change(all_versions):
+    """Plain-language comparison of the last two versions (for the 'Latest changes' card)."""
+    if len(all_versions) < 2:
+        return None
+    return ChangeEngine().compare(all_versions[-2].metrics(), all_versions[-1].metrics())
 
 
 @app.route('/project/<int:project_id>')
 @login_required
 def project_detail(project_id):
     proj = _owned_project(project_id)
+    exp = _show_experimental(current_user.id)
     all_versions = list(proj.versions)
     versions = _filter_versions(all_versions, request.args)
     filters  = {k: request.args.get(k, '') for k in
                 ('q', 'score_min', 'score_max', 'date_from', 'date_to', 'origin', 'has_notes')}
-    preds    = PredictionEngine().predict_all(all_versions) if len(all_versions) >= 3 else {}
-    insights = PatternAnalyzer().summarise(all_versions)
+    preds, insights, breakdown = {}, dict(available=False, insights=[]), None
+    latest = all_versions[-1] if all_versions else None
+    if exp:
+        preds    = PredictionEngine().predict_all(all_versions) if len(all_versions) >= 3 else {}
+        insights = PatternAnalyzer().summarise(all_versions)
+        breakdown = _breakdown_for(latest, current_user.id) if latest else None
     chart = dict(
         labels  =[f'v{v.version_num}' for v in all_versions],
         scores  =[v.quality_score for v in all_versions],
@@ -565,9 +622,10 @@ def project_detail(project_id):
         tempos  =[v.tempo for v in all_versions],
         patterns=[v.pattern_count for v in all_versions],
         samples =[v.sample_total for v in all_versions],
+        playlist=[v.playlist_items for v in all_versions],
+        plugins =[len(v.plugins) if v.plugins is not None else None for v in all_versions],
+        show_score=exp,
     )
-    latest = all_versions[-1] if all_versions else None
-    breakdown = _breakdown_for(latest, current_user.id) if latest else None
     cmp_default = dict(a=all_versions[-2].version_num, b=latest.version_num) \
         if len(all_versions) >= 2 else None
     return render_template('project.html', project=proj, versions=versions,
@@ -575,7 +633,9 @@ def project_detail(project_id):
                            filtered=any(filters.values()), predictions=preds,
                            insights=insights, breakdown=breakdown,
                            cmp_default=cmp_default, rollbacks=proj.rollbacks[:5],
-                           chart_data=json.dumps(chart))
+                           latest_change=_latest_change(all_versions),
+                           indicators=progress_indicators([v.metrics() for v in all_versions]),
+                           chart_data=Markup(json.dumps(chart).replace('<', '\\u003c')))
 
 
 @app.route('/project/<int:project_id>/delete', methods=['POST'])
@@ -601,10 +661,13 @@ def api_analyze_flp():
     if len(raw) < 22:
         return jsonify(ok=False, error='File too small.')
     parsed = parse_flp_bytes(raw)
-    score  = _scorer_for(current_user.id).calculate(dict(**parsed, version_num=1))
     parsed.pop('arrangement', None)
+    score = None
+    if parsed['parse_ok'] and None not in (parsed['tempo'], parsed['channel_count'], parsed['pattern_count']):
+        score = round(_scorer_for(current_user.id).calculate(dict(parsed, version_num=1)), 1)
     return jsonify(ok=True, filename=flp_file.filename,
-                   size_kb=round(len(raw) / 1024, 1), quality_score=round(score, 1), **parsed)
+                   size_kb=round(len(raw) / 1024, 1), quality_score=score,
+                   show_score=_show_experimental(current_user.id), **parsed)
 
 
 # ── API: Manual version upload ────────────────────────────────
@@ -638,9 +701,11 @@ def api_upload_version(project_id):
         db.session.rollback()
         notify(proj.user_id, proj.id, 'error', f'Version capture failed for "{proj.name}": {e}', 'error')
         return jsonify(ok=False, error=f'Capture failed: {e}')
-    p = parse_flp_bytes(raw); p.pop('arrangement', None)
-    return jsonify(ok=True, version_num=v.version_num,
-                   quality_score=round(v.quality_score, 1), **p)
+    return jsonify(ok=True, version_num=v.version_num, available=v.available,
+                   parse_error=v.parse_error or '', tempo=v.tempo, channel_count=v.channel_count,
+                   pattern_count=v.pattern_count, plugins=v.plugins,
+                   quality_score=round(v.quality_score, 1) if v.quality_score is not None else None,
+                   show_score=_show_experimental(current_user.id))
 
 
 # ── API: Watcher status ───────────────────────────────────────
@@ -677,11 +742,27 @@ def api_compare(project_id):
     vb = Version.query.filter_by(project_id=proj.id, version_num=b).first()
     if not va or not vb:
         return jsonify(ok=False, error='Version not found.'), 404
-    result = ChangeEngine().compare(va.metrics(), vb.metrics())
-    result['breakdown'] = dict(a=_breakdown_for(va, current_user.id),
-                               b=_breakdown_for(vb, current_user.id))
+    exp = _show_experimental(current_user.id)
+    result = ChangeEngine().compare(va.metrics(), vb.metrics(), include_score=exp)
+    if exp:
+        result['breakdown'] = dict(a=_breakdown_for(va, current_user.id),
+                                   b=_breakdown_for(vb, current_user.id))
     result['notes'] = dict(a=va.notes or '', b=vb.notes or '')
+    result['show_score'] = exp
     return jsonify(ok=True, **result)
+
+
+# ── Compare screen: pick any two versions and read the differences ──
+@app.route('/project/<int:project_id>/compare')
+@login_required
+def compare_page(project_id):
+    proj = _owned_project(project_id)
+    versions = list(proj.versions)
+    default_a = versions[-2].version_num if len(versions) >= 2 else None
+    default_b = versions[-1].version_num if versions else None
+    return render_template('compare.html', project=proj, versions=versions,
+                           default_a=request.args.get('a', default_a),
+                           default_b=request.args.get('b', default_b))
 
 
 # ── API: Version annotations (FR-08 / second FR list) ─────────
@@ -705,29 +786,41 @@ def _csv_safe(x):
     return "'" + s if s[:1] in ('=', '+', '-', '@', '\t', '\r') else s
 
 
-def _export_rows(proj, versions):
+def _u(x, fmt='{}'):
+    """Value for display/export; None is shown as 'unavailable', never as a number."""
+    return 'unavailable' if x is None else fmt.format(x)
+
+
+def _plugins_text(v):
+    return 'unavailable' if v.plugins is None else '; '.join(v.plugins)
+
+
+def _export_rows(proj, versions, exp=False):
     for v in versions:
-        yield [v.version_num, v.captured_at.strftime('%Y-%m-%d %H:%M'), v.origin or 'capture',
-               v.restored_from or '', round(v.tempo, 1), v.channel_count, v.pattern_count,
-               v.sample_total, v.playlist_items or 0, v.tracks_used or 0,
-               v.arrangement_bars or 0, v.complexity or 0, v.quality_score,
-               v.notes or '', v.file_hash or '']
+        row = [v.version_num, v.captured_at.strftime('%Y-%m-%d %H:%M'), v.origin or 'capture',
+               v.restored_from or '', _u(v.tempo), _u(v.channel_count), _u(v.pattern_count),
+               _u(v.sample_total), _u(v.playlist_items), _u(v.tracks_used),
+               _u(v.arrangement_bars), _plugins_text(v), v.notes or '', v.file_hash or '']
+        if exp:
+            row.append(_u(v.quality_score))
+        yield row
 
 
 EXPORT_HEADER = ['version', 'captured_at', 'origin', 'restored_from', 'tempo_bpm', 'channels',
                  'patterns', 'samples', 'playlist_clips', 'playlist_tracks', 'arrangement_bars',
-                 'complexity', 'quality_score', 'notes', 'sha256']
+                 'plugins', 'notes', 'sha256']
 
 
 @app.route('/project/<int:project_id>/export.csv')
 @login_required
 def export_csv(project_id):
     proj = _owned_project(project_id)
+    exp = _show_experimental(current_user.id)
     versions = _filter_versions(list(proj.versions), request.args)
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(EXPORT_HEADER)
-    for row in _export_rows(proj, versions):
+    w.writerow(EXPORT_HEADER + (['quality_score'] if exp else []))
+    for row in _export_rows(proj, versions, exp):
         w.writerow([_csv_safe(c) for c in row])
     fname = f'{_safe_name(proj.name)}_versions.csv'
     return Response(buf.getvalue(), mimetype='text/csv',
@@ -745,6 +838,7 @@ def export_pdf(project_id):
     from xml.sax.saxutils import escape
 
     proj = _owned_project(project_id)
+    exp = _show_experimental(current_user.id)
     all_v = list(proj.versions)
     versions = _filter_versions(all_v, request.args)
     st = getSampleStyleSheet()
@@ -760,26 +854,33 @@ def export_pdf(project_id):
             f'Versions shown: {len(versions)} of {len(all_v)}']
     el += [Paragraph(' &nbsp;|&nbsp; '.join(meta), st['BodyText']), Spacer(1, 6)]
 
-    if all_v:
-        scores = [v.quality_score for v in all_v]
-        best = max(all_v, key=lambda v: v.quality_score)
-        summ = (f'Latest score: <b>{all_v[-1].quality_score:.1f}</b> (v{all_v[-1].version_num}) &nbsp;|&nbsp; '
-                f'Best: <b>{best.quality_score:.1f}</b> (v{best.version_num}) &nbsp;|&nbsp; '
-                f'Average: <b>{sum(scores)/len(scores):.1f}</b>')
-        p = PredictionEngine().predict(all_v, 'quality_score')
-        if p.get('available'):
-            summ += (f' &nbsp;|&nbsp; Predicted next score: <b>{p["predicted_value"]:.0f}</b> '
-                     f'({p["trend"]}, {p["confidence"]} confidence)')
-        el += [Paragraph(summ, st['BodyText']), Spacer(1, 8)]
+    if exp:
+        scored = [v for v in all_v if v.quality_score is not None]
+        if scored:
+            best = max(scored, key=lambda v: v.quality_score)
+            summ = (f'Latest score: <b>{_u(all_v[-1].quality_score, "{:.1f}")}</b> (v{all_v[-1].version_num}) '
+                    f'&nbsp;|&nbsp; Best: <b>{best.quality_score:.1f}</b> (v{best.version_num})')
+            p = PredictionEngine().predict(all_v, 'quality_score')
+            if p.get('available'):
+                summ += (f' &nbsp;|&nbsp; Predicted next score: <b>{p["predicted_value"]:.0f}</b> '
+                         f'({p["trend"]}, {p["confidence"]} confidence)')
+            el += [Paragraph(summ, st['BodyText']), Spacer(1, 8)]
 
-    data = [['Ver', 'Captured', 'Origin', 'BPM', 'Ch', 'Pat', 'Smp', 'Clips', 'Cplx', 'Score', 'Notes']]
+    head = ['Ver', 'Captured', 'Origin', 'BPM', 'Ch', 'Pat', 'Smp', 'Clips', 'Plugins', 'Notes']
+    widths = [28, 78, 70, 40, 30, 30, 30, 34, 150, 180]
+    if exp:
+        head.insert(-1, 'Score'); widths.insert(-1, 36)
+    data = [head]
     for v in versions:
         origin = (v.origin or 'capture') + (f' (v{v.restored_from})' if v.restored_from else '')
-        data.append([f'v{v.version_num}', v.captured_at.strftime('%Y-%m-%d %H:%M'), origin,
-                     f'{v.tempo:.0f}', v.channel_count, v.pattern_count, v.sample_total,
-                     v.playlist_items or '—', f'{v.complexity or 0:.0f}', f'{v.quality_score:.1f}',
-                     Paragraph(escape((v.notes or '')[:300]), small)])
-    t = Table(data, repeatRows=1, colWidths=[28, 78, 70, 32, 26, 26, 28, 34, 32, 36, 270])
+        row = [f'v{v.version_num}', v.captured_at.strftime('%Y-%m-%d %H:%M'), origin,
+               _u(v.tempo, '{:.0f}'), _u(v.channel_count), _u(v.pattern_count), _u(v.sample_total),
+               _u(v.playlist_items), Paragraph(escape(_plugins_text(v)), small)]
+        if exp:
+            row.append(_u(v.quality_score, '{:.1f}'))
+        row.append(Paragraph(escape((v.notes or '')[:300]), small))
+        data.append(row)
+    t = Table(data, repeatRows=1, colWidths=widths)
     t.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f2937')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
@@ -791,10 +892,10 @@ def export_pdf(project_id):
 
     if proj.rollbacks:
         el += [Spacer(1, 12), Paragraph('Rollback history', st['Heading3'])]
-        rb = [['When', 'From', 'Restored', 'Recorded as', 'Status']]
+        rb = [['When', 'Restored version', 'Saved as (new copy)', 'Status']]
         for r in proj.rollbacks[:20]:
-            rb.append([r.created_at.strftime('%Y-%m-%d %H:%M'), f'v{r.from_version_num}',
-                       f'v{r.to_version_num}', f'v{r.new_version_num}' if r.new_version_num else '—',
+            rb.append([r.created_at.strftime('%Y-%m-%d %H:%M'), f'v{r.to_version_num}',
+                       Paragraph(escape(os.path.basename(r.restored_path) if r.restored_path else '—'), small),
                        r.status])
         t2 = Table(rb, repeatRows=1)
         t2.setStyle(TableStyle([('FONTSIZE', (0, 0), (-1, -1), 8),
@@ -807,23 +908,84 @@ def export_pdf(project_id):
                     headers={'Content-Disposition': f'attachment; filename="{fname}"'})
 
 
-# ── API: Rollback (FR-23..FR-26) ──────────────────────────────
-def _restore_targets(proj):
-    out = []
-    for label, path in (('FL Studio file', proj.source_path), ('server copy', proj.filepath)):
-        if not path or not path.lower().endswith('.flp'):
-            continue
-        d = os.path.dirname(path)
-        if d and os.path.isdir(d):
-            out.append((label, path))
-    return out
+# ── Rollback (R6/R7): restore as a NEW, uniquely named copy ───
+# The producer's current .flp is never opened for writing, renamed or replaced, and no
+# version row is changed. The restored copy is checked against the stored SHA-256.
+def _restore_dir(proj) -> str:
+    """Folder for the restored copy: next to the producer's file, else the server copy's
+    folder, else a PLMS folder under the backup root. Never created inside a Backup folder."""
+    for path in (proj.source_path, proj.filepath):
+        d = os.path.dirname(os.path.abspath(path)) if path else ''
+        if d and os.path.isdir(d) and os.access(d, os.W_OK):
+            return d
+    d = os.path.join(_backup_root(), f'{proj.id}_{_safe_name(proj.name)}', '_restored')
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
-def _atomic_write(path, raw):
-    tmp = path + '.plms_tmp'
-    with open(tmp, 'wb') as f:
+def _restore_stem(proj) -> str:
+    base = os.path.basename(proj.source_path or proj.filepath or '') or proj.name
+    stem = os.path.splitext(base)[0]
+    return _safe_name(stem)
+
+
+def _restore_name(proj, vnum, now=None, taken=lambda p: False) -> str:
+    """e.g. SongName_restored_v2_20261103.flp ; adds a time, then a counter, if that name is taken."""
+    now = now or datetime.now()
+    stem = f'{_restore_stem(proj)}_restored_v{vnum}'
+    d = _restore_dir(proj)
+    for suffix in (now.strftime('%Y%m%d'), now.strftime('%Y%m%d_%H%M%S')):
+        name = f'{stem}_{suffix}.flp'
+        if not os.path.exists(os.path.join(d, name)) and not taken(name):
+            return name
+    n = 2
+    while True:
+        name = f'{stem}_{now.strftime("%Y%m%d_%H%M%S")}_{n}.flp'
+        if not os.path.exists(os.path.join(d, name)):
+            return name
+        n += 1
+
+
+def _write_new_file(path: str, raw: bytes):
+    """Create `path` exclusively: raises FileExistsError instead of ever overwriting."""
+    with open(path, 'xb') as f:
         f.write(raw)
-    os.replace(tmp, path)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _rollback_checks(proj, ver):
+    """Return (ok, message). Shared by the rollback screen preview and the action."""
+    if proj.is_demo:
+        return False, 'Demo projects have no real files to restore.'
+    status = _verify_backup(ver)
+    if status in ('no_backup', 'missing'):
+        return False, (f'No backup file found for v{ver.version_num}. '
+                       f'Enable auto-backup in settings to capture backups.')
+    if status == 'corrupt':
+        return False, (f'Backup for v{ver.version_num} failed its integrity check '
+                       f'(the file changed since it was captured). Nothing was written.')
+    return True, ''
+
+
+@app.route('/project/<int:project_id>/rollback')
+@login_required
+def rollback_page(project_id):
+    proj = _owned_project(project_id)
+    versions = list(proj.versions)
+    latest = versions[-1] if versions else None
+    try:    sel = int(request.args.get('version', ''))
+    except ValueError: sel = None
+    rows = []
+    for v in reversed(versions):
+        ok, why = _rollback_checks(proj, v) if not proj.is_demo else (False, 'Demo project')
+        if latest and v.version_num == latest.version_num:
+            ok, why = False, 'This is the latest version.'
+        rows.append(dict(v=v, ok=ok, why=why,
+                         name=_restore_name(proj, v.version_num) if ok else ''))
+    return render_template('rollback.html', project=proj, rows=rows, selected=sel,
+                           restore_dir=_restore_dir(proj) if not proj.is_demo else '',
+                           history=proj.rollbacks[:20])
 
 
 @app.route('/api/rollback', methods=['POST'])
@@ -847,64 +1009,48 @@ def api_rollback():
         return jsonify(success=False, message='Demo projects have no real files to restore.')
     if latest and ver.version_num == latest.version_num:
         return jsonify(success=False, message=f'v{ver.version_num} is already the latest version.')
-    status = _verify_backup(ver)
-    if status in ('no_backup', 'missing'):
-        return fail(f'No backup file found for v{ver.version_num}. '
-                    f'Enable auto-backup in settings to capture backups.')
-    if status == 'corrupt':
-        return fail(f'Backup for v{ver.version_num} failed its integrity check '
-                    f'(the file changed since it was captured). No files were modified.')
-    targets = _restore_targets(proj)
-    if not targets:
-        return fail('Backup found but could not locate a project file to restore.')
+    ok, why = _rollback_checks(proj, ver)
+    if not ok:
+        return fail(why)
 
+    expected = ver.backup_hash or ver.file_hash
     with _capture_lock:
         raw = _read_stable(ver.backup_path)
-        h   = _sha256_bytes(raw)
-        # 1. safety copy of the current state (so the rollback itself is undoable)
-        safety, safety_raw = '', None
-        for _, path in targets:
-            if os.path.exists(path):
-                safety_raw = _read_stable(path)
-                sdir = os.path.join(_backup_root(), f'{proj.id}_{_safe_name(proj.name)}', '_pre_rollback')
-                os.makedirs(sdir, exist_ok=True)
-                safety = os.path.join(sdir, f'before_restore_v{ver.version_num}_'
-                                            f'{datetime.now().strftime("%Y%m%d_%H%M%S")}.flp')
-                with open(safety, 'wb') as f: f.write(safety_raw)
+        h = _sha256_bytes(raw)
+        if expected and h != expected:
+            return fail(f'Backup for v{ver.version_num} failed its integrity check. Nothing was written.')
+        dest_dir = _restore_dir(proj)
+        dest = None
+        for _ in range(5):                       # exclusive create; retry if the name raced
+            name = _restore_name(proj, ver.version_num)
+            dest = os.path.join(dest_dir, name)
+            try:
+                _write_new_file(dest, raw)
                 break
-        # 2. record the restore as a new version BEFORE touching files, so the
-        #    watcher sees identical content and does not create a duplicate
-        newv = _build_version(proj, parse_flp_bytes(raw), file_hash=h, origin='rollback',
-                              restored_from=ver.version_num,
-                              notes=f'Restored from v{ver.version_num}')
-        written = []
-        try:
-            for label, path in targets:
-                _recent_restores[_norm(path)] = (h, time.time())
-                _atomic_write(path, raw)
-                written.append((label, path))
-                if _sha256_file(path) != h:
-                    raise IOError(f'verification failed for {label}')
-        except Exception as e:
-            for _, path in written:                           # compensate
-                try:
-                    if safety_raw is not None: _atomic_write(path, safety_raw)
-                except Exception: pass
-            db.session.delete(newv); db.session.commit()
-            return fail(f'Restore aborted and rolled back: {e}')
-        _store_backup(proj, newv, raw)
+            except FileExistsError:
+                dest = None
+            except OSError as e:
+                return fail(f'Could not write the restored copy: {e}')
+        if dest is None:
+            return fail('Could not find a free file name for the restored copy.')
+        if _sha256_file(dest) != h:               # verify the copy, then remove only OUR new file
+            try: os.remove(dest)
+            except OSError: pass
+            return fail('The restored copy did not match the stored checksum and was removed. '
+                        'Your current file was not touched.')
         db.session.add(RollbackEvent(project_id=proj.id,
                                      from_version_num=latest.version_num if latest else None,
-                                     to_version_num=ver.version_num,
-                                     new_version_num=newv.version_num,
-                                     safety_backup_path=safety, status='success',
-                                     message=f'Restored: {", ".join(l for l, _ in written)}'))
+                                     to_version_num=ver.version_num, status='success',
+                                     restored_path=dest, restored_hash=h,
+                                     message=f'Restored v{ver.version_num} as {os.path.basename(dest)}'))
         db.session.commit()
     notify(proj.user_id, proj.id, 'rollback',
-           f'"{proj.name}": rolled back to v{ver.version_num} — recorded as v{newv.version_num}.')
-    return jsonify(success=True, new_version_num=newv.version_num,
-                   message=f'Rolled back to v{ver.version_num} (recorded as v{newv.version_num}). '
-                           f'All earlier versions are kept. Reopen the project in FL Studio.')
+           f'"{proj.name}": v{ver.version_num} restored as {os.path.basename(dest)}.')
+    return jsonify(success=True, restored_name=os.path.basename(dest), restored_path=dest,
+                   restored_dir=dest_dir, sha256=h, verified=True,
+                   message=(f'Restored v{ver.version_num} as "{os.path.basename(dest)}". '
+                            f'Your current file and all versions are unchanged. '
+                            f'Open the new copy in FL Studio.'))
 
 
 # ── API: Backup integrity check (NFR-05 / NFR-11) ─────────────
@@ -990,6 +1136,11 @@ def settings():
                     flash(f'Weights saved — {n} existing version(s) re-scored.', 'success')
                 else:
                     flash('Weights saved. They apply to new versions.', 'success')
+        elif action == 'experimental':
+            s.show_experimental = 'show_experimental' in request.form
+            db.session.commit()
+            flash('Quality scoring and prediction are now ' +
+                  ('shown.' if s.show_experimental else 'hidden.'), 'success')
         elif action == 'toggle_watcher':
             if is_watching():
                 stop_watcher(); s.watcher_active = False
@@ -1033,4 +1184,4 @@ def settings():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, use_reloader=False, port=5000)
+    app.run(debug=os.environ.get('PLMS_DEBUG') == '1', use_reloader=False, port=5000)

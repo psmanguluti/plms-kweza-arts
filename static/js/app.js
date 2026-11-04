@@ -108,11 +108,13 @@ function initCharts() {
   const start = total > WINDOW_SIZE ? total - WINDOW_SIZE : 0;
 
   const labels   = data.labels.slice(start);
-  const scores   = data.scores.slice(start);
+  const scores   = (data.scores || []).slice(start);
   const channels = data.channels.slice(start);
   const tempos   = data.tempos.slice(start);
   const patterns = data.patterns.slice(start);
   const samples  = (data.samples || []).slice(start);
+  const playlist = (data.playlist || []).slice(start);
+  const plugins  = (data.plugins || []).slice(start);
 
   if (total > WINDOW_SIZE) {
     document.querySelectorAll('.chart-window-note').forEach(el => {
@@ -153,6 +155,7 @@ function initCharts() {
           borderWidth       : type === 'line' ? 2 : 1,
           fill              : type === 'line',
           tension           : 0.35,
+          spanGaps          : false,      // unavailable versions leave a gap, never a fake value
           pointBackgroundColor: color,
           pointRadius       : type === 'line' ? (vals.length > 12 ? 2 : 4) : undefined,
           pointHoverRadius  : type === 'line' ? 6 : undefined,
@@ -168,13 +171,15 @@ function initCharts() {
     });
   };
 
-  makeChart('chart-score',    'line', 'Quality Score', scores,   '#c8920a', { min: 0, max: 100 });
+  if (data.show_score) makeChart('chart-score', 'line', 'Quality Score', scores, '#c8920a', { min: 0, max: 100 });
   makeChart('chart-channels', 'bar',  'Channels',      channels, '#0aaeb8', { beginAtZero: true });
   makeChart('chart-tempo',    'line', 'Tempo',         tempos,   '#a78bfa', {});
   makeChart('chart-patterns', 'bar',  'Patterns',      patterns, '#22c55e', { beginAtZero: true });
+  makeChart('chart-playlist', 'line', 'Playlist clips', playlist, '#f472b6', { beginAtZero: true });
+  makeChart('chart-plugins',  'bar',  'Plugins',       plugins,  '#38bdf8', { beginAtZero: true });
 
   /* Sample count chart — only show if we have data */
-  if (samples.some(v => v > 0)) {
+  if (samples.some(v => v !== null && v > 0)) {
     makeChart('chart-samples', 'bar', 'Samples', samples, '#f59e0b', { beginAtZero: true });
   } else {
     const wrap = document.getElementById('chart-samples-wrap');
@@ -239,46 +244,34 @@ function plmsModal({ title, bodyHTML, confirmText = 'Confirm', danger = false, o
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-/* ── Rollback with confirmation modal (FR-23..FR-26) ────────── */
+/* ── Rollback screen: restore a version as a NEW copy ───────── */
 function initRollback() {
-  document.querySelectorAll('.version-rollback').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.preventDefault();
-      const pid  = parseInt(btn.dataset.projectId);
-      const vnum = parseInt(btn.dataset.versionNum);
-      plmsModal({
-        title: `Roll back to version ${vnum}?`,
-        confirmText: 'Roll back',
-        danger: true,
-        bodyHTML: `
-          <p style="margin-bottom:12px">This restores the project file from the v${vnum} backup.</p>
-          <ul style="margin:0 0 14px 18px;color:var(--text-2);font-size:.85rem;line-height:1.7">
-            <li>Your current file is saved first, so this can be undone.</li>
-            <li>The restore is recorded as a <b>new version</b> — no history is deleted.</li>
-            <li>The restored file is checked against its saved checksum.</li>
-          </ul>
-          <label style="display:flex;gap:8px;align-items:flex-start;font-size:.85rem;color:var(--text-1)">
-            <input type="checkbox" id="rb-closed" style="margin-top:3px">
-            I have closed this project in FL Studio.
-          </label>`,
-        onOpen: (bd, ok) => {
-          ok.disabled = true;
-          bd.querySelector('#rb-closed').addEventListener('change', ev => ok.disabled = !ev.target.checked);
-        },
-        onConfirm: async (bd, close) => {
-          try {
-            const r = await fetch('/api/rollback', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ project_id: pid, version_num: vnum }) });
-            const d = await r.json();
-            showToast(d.message || d.error || 'Rollback finished.', d.success ? 'success' : 'error');
-            close();
-            if (d.success) setTimeout(() => location.reload(), 1600);
-          } catch (err) {
-            showToast('Network error during rollback.', 'error');
-          }
+  document.querySelectorAll('.rb-restore').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const out = document.getElementById('rb-result');
+      btn.disabled = true;
+      out.innerHTML = '<p class="text-muted">Restoring…</p>';
+      try {
+        const r = await fetch('/api/rollback', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project_id: +btn.dataset.projectId, version_num: +btn.dataset.versionNum }) });
+        const d = await r.json();
+        if (d.success) {
+          out.innerHTML = `<div class="rb-ok"><b>Restored as a new file</b>
+            <div class="mono" style="font-size:1rem;margin:6px 0">${esc(d.restored_name)}</div>
+            <div class="rb-line">Folder: <span class="mono">${esc(d.restored_dir)}</span></div>
+            <div class="rb-line">SHA-256 checked against the stored version: <b>match</b>
+              <span class="mono" style="color:var(--text-3)">${esc(d.sha256.slice(0, 16))}…</span></div>
+            <div class="rb-line">Your current file and every saved version were not changed.</div></div>`;
+          showToast(d.message, 'success');
+        } else {
+          out.innerHTML = `<div class="rb-fail"><b>Nothing was restored.</b> ${esc(d.message || 'Unknown error')}</div>`;
+          showToast(d.message || 'Rollback failed.', 'error');
         }
-      });
+      } catch (e) {
+        out.innerHTML = '<div class="rb-fail">Network error. Nothing was restored.</div>';
+      }
+      btn.disabled = false;
     });
   });
 }
@@ -318,61 +311,61 @@ function initNotes() {
 }
 
 /* ── Compare any two versions ───────────────────────────────── */
+function renderComparison(d) {
+  const arrow = { increased: '▲', decreased: '▼', unchanged: '–', unavailable: '' };
+  const na = '<span class="na">unavailable</span>';
+  const rows = d.metrics.map(m => `
+    <tr class="cmp-${m.direction}">
+      <td>${esc(m.label)}</td>
+      <td class="mono">${m.before === null ? na : m.before}</td>
+      <td class="mono">${m.after === null ? na : m.after}</td>
+      <td class="mono">${m.available ? `${arrow[m.direction]} ${m.delta > 0 ? '+' : ''}${m.delta} ${esc(m.unit)}` : na}</td>
+    </tr>`).join('');
+  const names = a => a === null ? na : (a.length ? a.map(esc).join(', ') : '—');
+  const pl = d.plugins;
+  const pluginRows = `
+    <tr class="${pl.available && (pl.added.length || pl.removed.length) ? '' : 'cmp-unchanged'}">
+      <td>Plugins (compared as sets)</td><td>${names(pl.before)}</td><td>${names(pl.after)}</td>
+      <td>${pl.available ? `<b>added:</b> ${names(pl.added)}<br><b>removed:</b> ${names(pl.removed)}` : na}</td></tr>`;
+  const list = (items, fmt) => items.length ? items.map(fmt).join(', ') : '—';
+  const a = d.arrangement;
+  const arr = a.available ? `
+    <div class="cmp-arr">
+      <div><b>Patterns added:</b> ${list(a.patterns_added, p => `#${p.id} (${p.count}×)`)}</div>
+      <div><b>Patterns removed:</b> ${list(a.patterns_removed, p => `#${p.id}`)}</div>
+      <div><b>Pattern usage changed:</b> ${list(a.patterns_changed, p => `#${p.id} ${p.before}→${p.after}`)}</div>
+      <div><b>Playlist tracks added:</b> ${list(a.tracks_added, t => `T${t.id}`)}
+           &nbsp; <b>removed:</b> ${list(a.tracks_removed, t => `T${t.id}`)}</div>
+    </div>` : '<p class="text-muted" style="font-size:.8rem">Arrangement details are unavailable for one of these versions.</p>';
+  let score = '', brk = '';
+  if (d.show_score && d.score) {
+    const f = x => x === null ? na : x;
+    score = `<tr class="cmp-score"><td>Quality score (experimental)</td><td class="mono">${f(d.score.a)}</td>
+      <td class="mono">${f(d.score.b)}</td><td class="mono">${d.score.delta === null ? na : (d.score.delta > 0 ? '+' : '') + d.score.delta}</td></tr>`;
+  }
+  const noteBlock = (v, n) => n ? `<div class="text-muted" style="font-size:.78rem;margin-top:6px">v${v} note: ${esc(n)}</div>` : '';
+  const banner = d.identical ? '<div class="rb-ok" style="margin:10px 0">These two versions show <b>no differences</b> in the properties PLMS reads.</div>' : '';
+  return `
+    <p style="margin:10px 0;color:var(--text-1)">${esc(d.summary)}</p>${banner}
+    <div class="table-scroll"><table class="cmp-table">
+      <thead><tr><th>Property</th><th>v${d.a.version_num}</th><th>v${d.b.version_num}</th><th>Change</th></tr></thead>
+      <tbody>${rows}${pluginRows}${score}</tbody></table></div>
+    ${arr}${brk}${noteBlock(d.a.version_num, d.notes.a)}${noteBlock(d.b.version_num, d.notes.b)}`;
+}
+
 function initCompare() {
   const root = document.getElementById('compare-panel');
   if (!root) return;
   const pid = root.dataset.projectId;
   const selA = document.getElementById('cmp-a'), selB = document.getElementById('cmp-b');
   const out = document.getElementById('cmp-result');
-  const arrow = { increased: '▲', decreased: '▼', unchanged: '–', 'n/a': '' };
-
   async function run() {
     if (selA.value === selB.value) { out.innerHTML = '<p class="text-muted">Choose two different versions.</p>'; return; }
     out.innerHTML = '<p class="text-muted">Comparing…</p>';
     try {
       const r = await fetch(`/api/project/${pid}/compare?a=${selA.value}&b=${selB.value}`);
       const d = await r.json();
-      if (!d.ok) { out.innerHTML = `<p class="text-muted">${esc(d.error)}</p>`; return; }
-      const rows = d.metrics.map(m => `
-        <tr class="cmp-${m.direction}">
-          <td>${esc(m.label)}</td>
-          <td class="mono">${m.available ? m.before : '—'}</td>
-          <td class="mono">${m.available ? m.after : '—'}</td>
-          <td class="mono">${m.available ? `${arrow[m.direction]} ${m.delta > 0 ? '+' : ''}${m.delta} ${esc(m.unit)}` : 'no arrangement data'}</td>
-        </tr>`).join('');
-      const list = (items, fmt) => items.length ? items.map(fmt).join(', ') : '—';
-      const a = d.arrangement;
-      const arr = a.available ? `
-        <div class="cmp-arr">
-          <div><b>Patterns added:</b> ${list(a.patterns_added, p => `#${p.id} (${p.count}×)`)}</div>
-          <div><b>Patterns removed:</b> ${list(a.patterns_removed, p => `#${p.id}`)}</div>
-          <div><b>Pattern usage changed:</b> ${list(a.patterns_changed, p => `#${p.id} ${p.before}→${p.after}`)}</div>
-          <div><b>Playlist tracks added:</b> ${list(a.tracks_added, t => `T${t.id}`)}
-               &nbsp; <b>removed:</b> ${list(a.tracks_removed, t => `T${t.id}`)}</div>
-        </div>` : '<p class="text-muted" style="font-size:.8rem">Arrangement changes need versions captured with playlist data (newer captures).</p>';
-      const bars = (bd) => bd.dimensions.map(x => `
-        <div style="display:flex;align-items:center;gap:8px;font-size:.75rem;margin:2px 0">
-          <span style="width:140px;color:var(--text-2)">${esc(x.label)}</span>
-          <div style="flex:1;height:6px;background:var(--bg-elevated);border-radius:4px;overflow:hidden">
-            <div style="width:${x.max ? Math.round(x.points / x.max * 100) : 0}%;height:100%;background:var(--gold)"></div></div>
-          <span class="mono" style="width:70px;text-align:right">${x.points}/${x.max}</span>
-        </div>`).join('');
-      const noteBlock = (v, n) => n ? `<div class="text-muted" style="font-size:.78rem;margin-top:6px">v${v} note: ${esc(n)}</div>` : '';
-      out.innerHTML = `
-        <p style="margin:10px 0;color:var(--text-1)">${esc(d.summary)}</p>
-        <div class="table-scroll"><table class="cmp-table">
-          <thead><tr><th>Metric</th><th>v${d.a.version_num}</th><th>v${d.b.version_num}</th><th>Change</th></tr></thead>
-          <tbody>
-            <tr class="cmp-score"><td>Quality score</td><td class="mono">${d.a.quality_score}</td>
-                <td class="mono">${d.b.quality_score}</td>
-                <td class="mono">${d.score_delta > 0 ? '+' : ''}${d.score_delta}</td></tr>
-            ${rows}
-          </tbody></table></div>
-        ${arr}
-        <div class="cmp-break" style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:14px">
-          <div><b style="font-size:.8rem">v${d.a.version_num} score breakdown</b>${bars(d.breakdown.a)}</div>
-          <div><b style="font-size:.8rem">v${d.b.version_num} score breakdown</b>${bars(d.breakdown.b)}</div>
-        </div>${noteBlock(d.a.version_num, d.notes.a)}${noteBlock(d.b.version_num, d.notes.b)}`;
+      out.innerHTML = d.ok ? renderComparison(d) : `<p class="text-muted">${esc(d.error)}</p>`;
     } catch (e) { out.innerHTML = '<p class="text-muted">Could not load comparison.</p>'; }
   }
   document.getElementById('cmp-run').addEventListener('click', run);

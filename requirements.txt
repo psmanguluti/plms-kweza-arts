@@ -7,4 +7,3 @@ watchdog>=4.0.1
 numpy>=2.0.0
 scikit-learn>=1.5.0
 reportlab>=4.0.0
-pyflp>=2.2.1

@@ -16,6 +16,10 @@
     <input type="file" id="upload-version-input" accept=".flp"
            style="position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%">
   </label>
+  {% if project.version_count >= 2 %}
+  <a class="btn btn-secondary btn-sm" href="{{ url_for('compare_page', project_id=project.id) }}"><i data-lucide="git-compare"></i> Compare</a>
+  {% if not project.is_demo %}<a class="btn btn-secondary btn-sm" href="{{ url_for('rollback_page', project_id=project.id) }}"><i data-lucide="rotate-ccw"></i> Rollback</a>{% endif %}
+  {% endif %}
   {% set qs = request.query_string.decode() %}
   <a class="btn btn-secondary btn-sm" href="{{ url_for('export_csv', project_id=project.id) }}{{ '?' + qs if qs }}" title="Export the version list as CSV">
     <i data-lucide="file-spreadsheet"></i> CSV
@@ -61,20 +65,32 @@
       <div class="stat-label">Total Versions</div>
     </div>
   </div>
+  {% if show_experimental %}
   <div class="stat-card">
     <div class="stat-icon green"><i data-lucide="bar-chart-2"></i></div>
     <div class="stat-info">
       <div class="stat-value {{ project.score_class }}">
         {{ project.latest_score|round(1) if project.latest_score else '—' }}
       </div>
-      <div class="stat-label">Latest Score</div>
+      <div class="stat-label">Latest Score (experimental)</div>
     </div>
   </div>
+  {% else %}
+  <div class="stat-card">
+    <div class="stat-icon green"><i data-lucide="plug"></i></div>
+    <div class="stat-info">
+      <div class="stat-value">
+        {% if project.latest_version and project.latest_version.plugins is not none %}{{ project.latest_version.plugins|length }}{% else %}<span class="na">unavailable</span>{% endif %}
+      </div>
+      <div class="stat-label">Plugins</div>
+    </div>
+  </div>
+  {% endif %}
   <div class="stat-card">
     <div class="stat-icon teal"><i data-lucide="music-4"></i></div>
     <div class="stat-info">
       <div class="stat-value">
-        {% if project.latest_version %}{{ project.latest_version.tempo|round(1) }}{% else %}—{% endif %}
+        {% if project.latest_version and project.latest_version.tempo is not none %}{{ project.latest_version.tempo|round(1) }}{% elif project.latest_version %}<span class="na">unavailable</span>{% else %}—{% endif %}
       </div>
       <div class="stat-label">Current BPM</div>
     </div>
@@ -83,7 +99,7 @@
     <div class="stat-icon purple"><i data-lucide="layers"></i></div>
     <div class="stat-info">
       <div class="stat-value">
-        {% if project.latest_version %}{{ project.latest_version.channel_count }}{% else %}—{% endif %}
+        {% if project.latest_version and project.latest_version.channel_count is not none %}{{ project.latest_version.channel_count }}{% elif project.latest_version %}<span class="na">unavailable</span>{% else %}—{% endif %}
       </div>
       <div class="stat-label">Channels</div>
     </div>
@@ -103,9 +119,9 @@
   <form method="GET" class="filter-bar" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;padding:0 24px 14px">
     <div><label class="fl">Search</label>
       <input type="text" name="q" value="{{ filters.q }}" placeholder="v3 or note text" class="fi" style="width:150px"></div>
-    <div><label class="fl">Score</label>
+    {% if show_experimental %}<div><label class="fl">Score</label>
       <input type="number" name="score_min" value="{{ filters.score_min }}" placeholder="min" min="0" max="100" class="fi" style="width:64px">
-      <input type="number" name="score_max" value="{{ filters.score_max }}" placeholder="max" min="0" max="100" class="fi" style="width:64px"></div>
+      <input type="number" name="score_max" value="{{ filters.score_max }}" placeholder="max" min="0" max="100" class="fi" style="width:64px"></div>{% endif %}
     <div><label class="fl">From</label><input type="date" name="date_from" value="{{ filters.date_from }}" class="fi"></div>
     <div><label class="fl">To</label><input type="date" name="date_to" value="{{ filters.date_to }}" class="fi"></div>
     <div><label class="fl">Origin</label>
@@ -134,6 +150,13 @@
     .cmp-unchanged{opacity:.55}.cmp-score td{font-weight:600}
     .cmp-arr{font-size:.82rem;color:var(--text-2);margin-top:12px;display:grid;gap:4px}
     .table-scroll{overflow-x:auto}
+    .na{color:var(--text-3);font-style:italic;font-size:.8em;font-weight:400}
+    .ind-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+    .ind{border:1px solid var(--border);border-radius:var(--radius-md);padding:12px 14px;background:var(--bg-elevated)}
+    .ind-label{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3)}
+    .ind-value{font-size:1.4rem;font-weight:600;color:var(--text-1);margin:4px 0}
+    .ind-formula{font-size:.72rem;color:var(--text-2);line-height:1.5}
+    .ind-formula code{font-family:var(--mono,monospace);color:var(--gold-light)}
   </style>
 
   <div class="card-body" style="padding-bottom:8px">
@@ -146,31 +169,26 @@
               {% elif version.origin == 'upload' %}<span class="origin-tag">upload</span>
               {% elif version.origin == 'demo' %}<span class="origin-tag">demo</span>{% endif %}
             </div>
-            <div class="version-score {{ version.score_class }}">
-              {{ version.quality_score|round(0)|int }}
-            </div>
+            {% if not version.available %}
+            <div class="version-meta"><div class="version-meta-row" style="display:block;color:var(--text-2)">
+              Details <b>unavailable</b><br><span style="font-size:.7rem;color:var(--text-3)">{{ version.parse_error or 'file could not be read' }}. Saved and restorable.</span></div></div>
+            {% else %}
+            {% if show_experimental %}<div class="version-score {{ version.score_class }}">{{ version.quality_score|round(0)|int if version.quality_score is not none else '—' }}</div>{% endif %}
             <div class="version-meta">
-              <div class="version-meta-row">
-                <span>Tempo</span>
-                <span>{{ version.tempo|round(0)|int }} BPM</span>
-              </div>
-              <div class="version-meta-row">
-                <span>Channels</span>
-                <span>{{ version.channel_count }}</span>
-              </div>
-              <div class="version-meta-row">
-                <span>Patterns</span>
-                <span>{{ version.pattern_count }} pat.</span>
-              </div>
-              <div class="version-meta-row">
-                <i data-lucide="music" style="width:11px;height:11px"></i>
-                <span>{{ version.sample_total }} smp.</span>
-              </div>
+              <div class="version-meta-row"><span>Tempo</span>
+                <span>{% if version.tempo is not none %}{{ version.tempo|round(0)|int }} BPM{% else %}<span class="na">unavailable</span>{% endif %}</span></div>
+              <div class="version-meta-row"><span>Channels</span>
+                <span>{% if version.channel_count is not none %}{{ version.channel_count }}{% else %}<span class="na">unavailable</span>{% endif %}</span></div>
+              <div class="version-meta-row"><span>Patterns</span>
+                <span>{% if version.pattern_count is not none %}{{ version.pattern_count }} pat.{% else %}<span class="na">unavailable</span>{% endif %}</span></div>
+              <div class="version-meta-row"><span>Plugins</span>
+                <span>{% if version.plugins is not none %}{{ version.plugins|length }}{% else %}<span class="na">unavailable</span>{% endif %}</span></div>
             </div>
+            {% if show_experimental and version.quality_score is not none %}
             <div class="score-bar-wrap" style="margin-bottom:10px">
-              <div class="score-bar-fill {{ version.score_class }}"
-                   data-score="{{ version.quality_score }}"></div>
-            </div>
+              <div class="score-bar-fill {{ version.score_class }}" data-score="{{ version.quality_score }}"></div>
+            </div>{% endif %}
+            {% endif %}
             <div class="version-date">
               {{ version.captured_at.strftime('%d %b %Y · %H:%M') }}
             </div>
@@ -182,12 +200,10 @@
               <span>{{ 'Edit note' if version.notes else 'Add note' }}</span>
             </button>
             {% if version.version_num != project.latest_version.version_num and not project.is_demo %}
-              <button
-                class="version-rollback"
-                data-project-id="{{ project.id }}"
-                data-version-num="{{ version.version_num }}">
-                <i data-lucide="rotate-ccw"></i> Rollback
-              </button>
+              <a class="version-rollback" style="text-decoration:none;display:flex;align-items:center;justify-content:center;gap:5px"
+                 href="{{ url_for('rollback_page', project_id=project.id, version=version.version_num) }}">
+                <i data-lucide="rotate-ccw"></i> Restore as copy
+              </a>
             {% endif %}
           </div>
         {% endfor %}
@@ -208,31 +224,28 @@
   </div>
 </div>
 
-<!-- ── Compare any two versions (FR-06) ───────────────────────── -->
-{% if all_count >= 2 %}
-<div class="card mb-6" id="compare-panel" data-project-id="{{ project.id }}" data-auto="{{ 1 if cmp_default else 0 }}">
-  <div class="card-header">
-    <h3><i data-lucide="git-compare" style="width:16px;height:16px;display:inline;vertical-align:middle;margin-right:8px;color:var(--gold)"></i>Compare Versions</h3>
-  </div>
+<!-- ── Progress indicators (every formula shown) ─────────────── -->
+{% if indicators %}
+<div class="card mb-6">
+  <div class="card-header"><h3><i data-lucide="trending-up" style="width:16px;height:16px;display:inline;vertical-align:middle;margin-right:8px;color:var(--gold)"></i>Progress Indicators</h3>
+    <span class="badge badge-muted">latest version</span></div>
   <div class="card-body">
-    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
-      <div><label class="fl">From</label>
-        <select id="cmp-a" class="fi">
-          {% for v in project.versions %}<option value="{{ v.version_num }}" {% if cmp_default and v.version_num == cmp_default.a %}selected{% endif %}>v{{ v.version_num }} · {{ v.quality_score|round(0)|int }}</option>{% endfor %}
-        </select></div>
-      <div><label class="fl">To</label>
-        <select id="cmp-b" class="fi">
-          {% for v in project.versions %}<option value="{{ v.version_num }}" {% if cmp_default and v.version_num == cmp_default.b %}selected{% endif %}>v{{ v.version_num }} · {{ v.quality_score|round(0)|int }}</option>{% endfor %}
-        </select></div>
-      <button type="button" class="btn btn-primary btn-sm" id="cmp-run"><i data-lucide="git-compare"></i> Compare</button>
+    <div class="ind-grid">
+      {% for i in indicators %}
+      <div class="ind">
+        <div class="ind-label">{{ i.label }}</div>
+        <div class="ind-value">{% if i.value is not none %}{{ i.value }}{% else %}<span class="na">unavailable</span>{% endif %}</div>
+        <div class="ind-formula">Formula: <code>{{ i.formula }}</code><br>Worked: <code>{{ i.workings }}</code></div>
+      </div>
+      {% endfor %}
     </div>
-    <div id="cmp-result"></div>
+    <p class="text-xs text-muted" style="margin-top:10px">These describe what changed. They do not rate the track.</p>
   </div>
 </div>
 {% endif %}
 
-<!-- ── Score breakdown + development patterns ──────────────────── -->
-{% if breakdown %}
+<!-- ── Score breakdown + development patterns (experimental, off by default) ── -->
+{% if show_experimental and breakdown %}
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px">
   <div class="card">
     <div class="card-header"><h3><i data-lucide="gauge" style="width:16px;height:16px;display:inline;vertical-align:middle;margin-right:8px;color:var(--gold)"></i>Score Breakdown · v{{ project.latest_version.version_num }}</h3>
@@ -265,117 +278,70 @@
 </div>
 {% endif %}
 
-<!-- ── Two-column: Changes + Predictions ─────────────────────── -->
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px">
-
-  <!-- Latest changes -->
+<!-- ── Latest changes (plain language) ──────────────────────── -->
+<div style="display:grid;grid-template-columns:{{ '1fr 1fr' if show_experimental else '1fr' }};gap:18px;margin-bottom:18px">
   <div class="card">
     <div class="card-header">
       <h3><i data-lucide="diff" style="width:16px;height:16px;display:inline;vertical-align:middle;margin-right:8px;color:var(--gold)"></i>Latest Changes</h3>
-      {% if project.latest_version %}
-        <span class="badge badge-muted">v{{ project.latest_version.version_num }}</span>
-      {% endif %}
+      {% if project.latest_version %}<span class="badge badge-muted">v{{ project.latest_version.version_num }}</span>{% endif %}
     </div>
     <div class="card-body">
-      {% if project.latest_version and project.latest_version.changes and project.latest_version.changes.total > 0 %}
+      {% if latest_change %}
+        <p style="margin:0 0 12px;color:var(--text-1)">{{ latest_change.summary }}</p>
+        {% if latest_change.a.available and latest_change.b.available %}
         <div class="changes-list">
-          {% for key, change in project.latest_version.changes.items() %}
-            {% if key != 'total' %}
-              <div class="change-item {{ change.direction }}">
-                {% if change.direction == 'increased' %}
-                  <i data-lucide="arrow-up-right"></i>
-                {% else %}
-                  <i data-lucide="arrow-down-right"></i>
-                {% endif %}
-                <span class="change-label">{{ change.label }}</span>
-                <span class="change-values">
-                  <strong>{{ change.before }}</strong>
-                  →
-                  <strong>{{ change.after }}</strong>
-                  <span style="color:var(--text-3)">({{ '+' if change.delta > 0 else '' }}{{ change.delta }} {{ change.unit }})</span>
-                </span>
-              </div>
-            {% endif %}
+          {% for m in latest_change.metrics if m.available and m.direction in ('increased','decreased') %}
+            <div class="change-item {{ m.direction }}">
+              <i data-lucide="{{ 'arrow-up-right' if m.direction == 'increased' else 'arrow-down-right' }}"></i>
+              <span class="change-label">{{ m.label }}</span>
+              <span class="change-values"><strong>{{ m.before }}</strong> → <strong>{{ m.after }}</strong>
+                <span style="color:var(--text-3)">({{ '+' if m.delta > 0 else '' }}{{ m.delta }} {{ m.unit }})</span></span>
+            </div>
           {% endfor %}
+          {% for n in latest_change.plugins.added %}<div class="change-item increased"><i data-lucide="plus"></i><span class="change-label">Plugin added</span><span class="change-values"><strong>{{ n }}</strong></span></div>{% endfor %}
+          {% for n in latest_change.plugins.removed %}<div class="change-item decreased"><i data-lucide="minus"></i><span class="change-label">Plugin removed</span><span class="change-values"><strong>{{ n }}</strong></span></div>{% endfor %}
         </div>
-      {% elif project.version_count == 1 %}
+        {% endif %}
+      {% else %}
         <div class="empty-state" style="padding:32px 0">
           <div class="empty-icon"><i data-lucide="git-commit-horizontal"></i></div>
           <p>This is the first version. Changes will appear from version 2 onwards.</p>
         </div>
-      {% else %}
-        <div class="empty-state" style="padding:32px 0">
-          <div class="empty-icon"><i data-lucide="check-circle"></i></div>
-          <p>No measurable changes detected between the last two versions.</p>
-        </div>
       {% endif %}
     </div>
   </div>
 
-  <!-- Predictions -->
+  {% if show_experimental %}
+  <!-- Predictions (experimental) -->
   <div class="card">
     <div class="card-header">
-      <h3><i data-lucide="wand-2" style="width:16px;height:16px;display:inline;vertical-align:middle;margin-right:8px;color:var(--gold)"></i>Predictions</h3>
-      {% if predictions %}
-        <span class="badge badge-gold">
-          {% if predictions.quality_score and predictions.quality_score.confidence %}
-            {{ predictions.quality_score.confidence|capitalize }} confidence (R² {{ predictions.quality_score.r_squared }})
-          {% endif %}
-        </span>
-      {% endif %}
+      <h3><i data-lucide="wand-2" style="width:16px;height:16px;display:inline;vertical-align:middle;margin-right:8px;color:var(--gold)"></i>Predictions (experimental)</h3>
     </div>
     <div class="card-body">
-      {% if predictions %}
-        <div class="prediction-grid" style="grid-template-columns:1fr">
-          {% if predictions.quality_score and predictions.quality_score.available %}
-            {% set qs = predictions.quality_score %}
-            <div class="prediction-item">
-              <div class="pred-metric">Next Score (v{{ qs.next_version }})</div>
-              <div class="pred-value {{ 'score-high' if qs.predicted_value >= 70 else ('score-mid' if qs.predicted_value >= 40 else 'score-low') }}">
-                {{ qs.predicted_value|round(1) }}
-              </div>
-              <div class="pred-trend {{ qs.trend }}">
-                <i data-lucide="{{ 'trending-up' if qs.trend in ['growing','improving'] else ('trending-down' if qs.trend in ['declining','tapering'] else 'minus') }}"
-                   style="width:12px;height:12px;display:inline;vertical-align:middle;margin-right:4px"></i>
-                {{ qs.trend|capitalize }}
-              </div>
-            </div>
-          {% endif %}
-          {% if predictions.channel_count and predictions.channel_count.available %}
-            {% set cc = predictions.channel_count %}
-            <div class="prediction-item">
-              <div class="pred-metric">Expected Channels (v{{ cc.next_version }})</div>
-              <div class="pred-value">{{ cc.predicted_value|round(0)|int }}</div>
-              <div class="pred-trend {{ cc.trend }}">{{ cc.trend|capitalize }}</div>
-            </div>
-          {% endif %}
-          {% if predictions.tempo and predictions.tempo.available %}
-            {% set t = predictions.tempo %}
-            <div class="prediction-item">
-              <div class="pred-metric">Predicted Tempo (v{{ t.next_version }})</div>
-              <div class="pred-value">{{ t.predicted_value|round(1) }} BPM</div>
-              <div class="pred-trend {{ t.trend }}">{{ t.trend|capitalize }}</div>
-            </div>
-          {% endif %}
+      {% if predictions and predictions.quality_score and predictions.quality_score.available %}
+        {% set qs = predictions.quality_score %}
+        <div class="prediction-item">
+          <div class="pred-metric">Next Score (v{{ qs.next_version }})</div>
+          <div class="pred-value">{{ qs.predicted_value|round(1) }}</div>
+          <div class="pred-trend {{ qs.trend }}">{{ qs.trend|capitalize }} · {{ qs.confidence }} confidence</div>
         </div>
       {% else %}
-        <div class="empty-state" style="padding:32px 0">
-          <div class="empty-icon"><i data-lucide="wand-2"></i></div>
-          <p>Add at least 3 versions to unlock production trajectory predictions.</p>
-        </div>
+        <div class="empty-state" style="padding:32px 0"><p>Add at least 3 readable versions to see a trend.</p></div>
       {% endif %}
     </div>
   </div>
+  {% endif %}
 </div>
 
 {% if rollbacks %}
 <div class="card mb-6">
-  <div class="card-header"><h3><i data-lucide="history" style="width:16px;height:16px;display:inline;vertical-align:middle;margin-right:8px;color:var(--gold)"></i>Rollback History</h3></div>
+  <div class="card-header"><h3><i data-lucide="history" style="width:16px;height:16px;display:inline;vertical-align:middle;margin-right:8px;color:var(--gold)"></i>Restore History</h3>
+    <a class="btn btn-secondary btn-sm" href="{{ url_for('rollback_page', project_id=project.id) }}">Open rollback screen</a></div>
   <div class="card-body" style="font-size:.82rem">
     {% for r in rollbacks %}
-    <div style="display:flex;gap:12px;padding:6px 0;border-bottom:1px solid var(--border)">
+    <div style="display:flex;gap:12px;padding:6px 0;border-bottom:1px solid var(--border);flex-wrap:wrap">
       <span class="mono" style="color:var(--text-3)">{{ r.created_at.strftime('%d %b %H:%M') }}</span>
-      <span>v{{ r.from_version_num }} → restored v{{ r.to_version_num }}{% if r.new_version_num %} (saved as v{{ r.new_version_num }}){% endif %}</span>
+      <span>restored v{{ r.to_version_num }}{% if r.restored_path %} as <b class="mono">{{ r.restored_path|basename }}</b>{% endif %}</span>
       <span style="margin-left:auto;color:{{ 'var(--danger,#f87171)' if r.status == 'failed' else 'var(--success,#4ade80)' }}">{{ r.status }}</span>
     </div>
     {% if r.status == 'failed' %}<div style="font-size:.75rem;color:var(--text-3);padding:2px 0 6px">{{ r.message }}</div>{% endif %}
@@ -386,27 +352,20 @@
 
 <!-- ── Charts ──────────────────────────────────────────────────── -->
 {% if all_count >= 2 %}
+<p class="text-xs text-muted" style="margin:0 0 8px">Gaps in a chart mean the details for that version are unavailable.</p>
 <div class="chart-grid">
+  {% if show_experimental %}
   <div class="chart-wrap">
-    <h4>Quality Score <small class="chart-window-note" style="display:none;font-size:.65rem;color:var(--text-3);margin-left:6px;font-weight:400"></small></h4>
+    <h4>Quality Score (experimental) <small class="chart-window-note" style="display:none;font-size:.65rem;color:var(--text-3);margin-left:6px;font-weight:400"></small></h4>
     <canvas id="chart-score" height="160"></canvas>
   </div>
-  <div class="chart-wrap">
-    <h4>Channel Growth</h4>
-    <canvas id="chart-channels" height="160"></canvas>
-  </div>
-  <div class="chart-wrap">
-    <h4>Tempo Evolution</h4>
-    <canvas id="chart-tempo" height="160"></canvas>
-  </div>
-  <div class="chart-wrap">
-    <h4>Patterns</h4>
-    <canvas id="chart-patterns" height="160"></canvas>
-  </div>
-  <div class="chart-wrap" id="chart-samples-wrap">
-    <h4>Sample Channels</h4>
-    <canvas id="chart-samples" height="160"></canvas>
-  </div>
+  {% endif %}
+  <div class="chart-wrap"><h4>Channels</h4><canvas id="chart-channels" height="160"></canvas></div>
+  <div class="chart-wrap"><h4>Tempo</h4><canvas id="chart-tempo" height="160"></canvas></div>
+  <div class="chart-wrap"><h4>Patterns</h4><canvas id="chart-patterns" height="160"></canvas></div>
+  <div class="chart-wrap"><h4>Playlist clips</h4><canvas id="chart-playlist" height="160"></canvas></div>
+  <div class="chart-wrap"><h4>Plugins</h4><canvas id="chart-plugins" height="160"></canvas></div>
+  <div class="chart-wrap" id="chart-samples-wrap"><h4>Sample Channels</h4><canvas id="chart-samples" height="160"></canvas></div>
 </div>
 {% endif %}
 
@@ -480,7 +439,7 @@
     .then(r => r.json())
     .then(d => {
       if (d.ok) {
-        showToast(`v${d.version_num} captured — score ${d.quality_score} (${file.name})`, 'success');
+        showToast(d.available ? `v${d.version_num} captured (${file.name})` : `v${d.version_num} saved, but its details are unavailable (${d.parse_error})`, d.available ? 'success' : 'info');
         setTimeout(() => location.reload(), 1600);
       } else {
         showToast(d.error || 'Upload failed.', 'error');

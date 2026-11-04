@@ -21,34 +21,98 @@ _watch_folder = None
 _token        = 0
 _lock         = threading.Lock()
 
+# File-stability check (R2): a file is copied only after its size AND modified time
+# have stopped changing. STABLE_CHECKS identical readings, STABLE_INTERVAL seconds apart,
+# i.e. the file must be quiet for (STABLE_CHECKS - 1) * STABLE_INTERVAL seconds.
+STABLE_INTERVAL = 1.0
+STABLE_CHECKS   = 3
+STABLE_TIMEOUT  = 120.0
+
+
+def _signature(path):
+    """(size, mtime_ns) or None when the file is missing / locked mid-rename."""
+    try:
+        st = os.stat(path)
+        return (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+
+
+def wait_until_stable(path, interval=None, checks=None, timeout=None,
+                      sleep=time.sleep, clock=time.monotonic):
+    """Block until `path` has the same size and modified time on `checks` consecutive
+    readings, `interval` seconds apart. Returns True when stable, False on timeout.
+    An empty or missing file is never stable (FL Studio writes a temp file, then renames)."""
+    interval = STABLE_INTERVAL if interval is None else interval
+    checks   = STABLE_CHECKS   if checks   is None else checks
+    timeout  = STABLE_TIMEOUT  if timeout  is None else timeout
+    deadline = clock() + timeout
+    last, same = None, 0
+    while True:
+        sig = _signature(path)
+        if sig is not None and sig[0] > 0 and sig == last:
+            same += 1
+        else:
+            same = 1 if (sig is not None and sig[0] > 0) else 0
+        last = sig
+        if same >= checks:
+            return True
+        if clock() >= deadline:
+            return False
+        sleep(interval)
+
 
 class FLPHandler(FileSystemEventHandler):
     def __init__(self, capture_fn):
         self.capture_fn = capture_fn
-        self._last = {}
+        self._last  = {}             # path -> (size, mtime_ns) of the last file we captured
+        self._busy  = set()          # paths currently waiting for a stable file
+        self._dirty = set()          # paths that changed again while we were waiting
         self._dlock = threading.Lock()
 
-    def _debounce(self, path):
-        now = time.time()
+    def _begin(self, path):
+        """True if this thread should process `path`; otherwise mark it dirty so the
+        thread already waiting on it re-checks once more."""
         with self._dlock:
-            if now - self._last.get(path, 0) < 3.0:
+            if path in self._busy:
+                self._dirty.add(path)
                 return False
-            self._last[path] = now
+            self._busy.add(path)
             return True
+
+    def _end(self, path):
+        """True if the file changed again while we worked (caller loops once more)."""
+        with self._dlock:
+            if path in self._dirty:
+                self._dirty.discard(path)
+                return True
+            self._busy.discard(path)
+            return False
 
     def _handle(self, path):
         if not path.lower().endswith('.flp'):
             return
         if '/backup/' in path.lower().replace('\\', '/'):
             return               # FL Studio's own Backup folder
-        time.sleep(0.6)          # let FL Studio finish writing
-        if not self._debounce(path):
+        if not self._begin(path):
             return
-        logging.info(f'[Watcher] FLP change detected: {path}')
-        try:
-            self.capture_fn(path)
-        except Exception as e:
-            logging.error(f'[Watcher] Capture error: {e}', exc_info=True)
+        while True:
+            if wait_until_stable(path):
+                sig = _signature(path)
+                if sig is not None and self._last.get(path) == sig:
+                    pass                          # same file we already captured: nothing new
+                else:
+                    logging.info(f'[Watcher] FLP change detected: {path}')
+                    try:
+                        self.capture_fn(path)
+                        self._last[path] = sig
+                    except Exception as e:
+                        logging.error(f'[Watcher] Capture error: {e}', exc_info=True)
+            else:
+                logging.warning(f'[Watcher] {path} never stopped changing; skipped '
+                                f'(the next save will be captured).')
+            if not self._end(path):
+                break
 
     def on_modified(self, event):
         if not event.is_directory:

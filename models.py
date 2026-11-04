@@ -55,11 +55,13 @@ class Project(db.Model):
     def latest_version(self): return self.versions[-1] if self.versions else None
     @property
     def latest_score(self):
-        lv = self.latest_version; return lv.quality_score if lv else 0.0
+        lv = self.latest_version; return (lv.quality_score or 0.0) if lv else 0.0
     @property
     def score_trend(self):
         if len(self.versions) < 2: return 'neutral'
-        d = self.versions[-1].quality_score - self.versions[-2].quality_score
+        a, b = self.versions[-2].quality_score, self.versions[-1].quality_score
+        if a is None or b is None: return 'neutral'
+        d = b - a
         return 'up' if d > 2 else ('down' if d < -2 else 'neutral')
     @property
     def score_class(self):
@@ -79,18 +81,23 @@ class Version(db.Model):
     id               = db.Column(db.Integer, primary_key=True)
     project_id       = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=False)
     version_num      = db.Column(db.Integer, nullable=False)
-    tempo            = db.Column(db.Float,   default=120.0)
-    channel_count    = db.Column(db.Integer, default=0)
-    pattern_count    = db.Column(db.Integer, default=0)
-    sample_count     = db.Column(db.Integer, default=0)
+    # Properties are NULL ("unavailable") when the file could not be parsed. They are
+    # never filled with default values (R9).
+    parse_ok         = db.Column(db.Boolean, default=True)
+    parse_error      = db.Column(db.String(200), default='')
+    tempo            = db.Column(db.Float,   nullable=True)
+    channel_count    = db.Column(db.Integer, nullable=True)
+    pattern_count    = db.Column(db.Integer, nullable=True)
+    sample_count     = db.Column(db.Integer, nullable=True)
     # arrangement (playlist) data — FR-08 / FR-10
-    playlist_items   = db.Column(db.Integer, default=0)
-    tracks_used      = db.Column(db.Integer, default=0)
-    arrangement_bars = db.Column(db.Float,   default=0.0)
-    complexity       = db.Column(db.Float,   default=0.0)
+    playlist_items   = db.Column(db.Integer, nullable=True)
+    tracks_used      = db.Column(db.Integer, nullable=True)
+    arrangement_bars = db.Column(db.Float,   nullable=True)
+    plugins_json     = db.Column(db.Text,    default='')   # JSON list of plugin names; '' = unavailable
+    complexity       = db.Column(db.Float,   nullable=True)
     arrangement_json = db.Column(db.Text,    default='')
     breakdown_json   = db.Column(db.Text,    default='')   # score breakdown as computed at capture
-    quality_score    = db.Column(db.Float,   default=0.0)
+    quality_score    = db.Column(db.Float,   nullable=True)
     changes_json     = db.Column(db.Text,    default='{}')
     backup_path      = db.Column(db.String(500), default='')
     # integrity (NFR-05 / NFR-11): SHA-256 of captured file and of its backup copy
@@ -122,36 +129,51 @@ class Version(db.Model):
         return bool(self.arrangement)
 
     @property
+    def available(self):
+        """False when the file could not be parsed (properties are 'unavailable')."""
+        return self.parse_ok is not False
+
+    @property
+    def plugins(self):
+        """List of plugin names, or None when unavailable (not parsed / captured before
+        plugin extraction existed)."""
+        if not self.plugins_json:
+            return None
+        try:    return json.loads(self.plugins_json)
+        except Exception: return None
+
+    @property
     def sample_total(self):
         """sample_count may be text on databases migrated by older PLMS builds."""
-        try:    return int(self.sample_count or 0)
-        except (TypeError, ValueError): return 0
+        if self.sample_count is None: return None
+        try:    return int(self.sample_count)
+        except (TypeError, ValueError): return None
 
     @property
     def score_class(self):
-        return 'score-high' if self.quality_score >= 70 else \
-               ('score-mid' if self.quality_score >= 40 else 'score-low')
+        s = self.quality_score
+        if s is None: return 'score-low'
+        return 'score-high' if s >= 70 else ('score-mid' if s >= 40 else 'score-low')
 
     def metrics(self) -> dict:
-        """Dict form used by ChangeEngine / ScoringEngine."""
-        return dict(version_num=self.version_num, tempo=self.tempo,
-                    channel_count=self.channel_count, pattern_count=self.pattern_count,
-                    sample_count=self.sample_total, playlist_items=self.playlist_items or 0,
-                    tracks_used=self.tracks_used or 0,
-                    arrangement_bars=self.arrangement_bars or 0.0,
+        """Dict form used by ChangeEngine. None means 'unavailable'."""
+        return dict(version_num=self.version_num, available=self.available,
+                    tempo=self.tempo, channel_count=self.channel_count,
+                    pattern_count=self.pattern_count, sample_count=self.sample_total,
+                    playlist_items=self.playlist_items, tracks_used=self.tracks_used,
+                    arrangement_bars=self.arrangement_bars, plugins=self.plugins,
                     quality_score=self.quality_score,
                     has_arrangement=self.has_arrangement, arrangement=self.arrangement)
 
     def to_dict(self):
-        return dict(id=self.id, version_num=self.version_num, tempo=self.tempo,
-                    channel_count=self.channel_count, pattern_count=self.pattern_count,
-                    sample_count=self.sample_total, playlist_items=self.playlist_items or 0,
-                    tracks_used=self.tracks_used or 0,
-                    arrangement_bars=self.arrangement_bars or 0.0,
-                    complexity=self.complexity or 0.0,
-                    quality_score=self.quality_score, changes=self.changes,
-                    origin=self.origin or 'capture', restored_from=self.restored_from,
-                    notes=self.notes or '',
+        return dict(id=self.id, version_num=self.version_num, available=self.available,
+                    tempo=self.tempo, channel_count=self.channel_count,
+                    pattern_count=self.pattern_count, sample_count=self.sample_total,
+                    playlist_items=self.playlist_items, tracks_used=self.tracks_used,
+                    arrangement_bars=self.arrangement_bars, plugins=self.plugins,
+                    complexity=self.complexity, quality_score=self.quality_score,
+                    changes=self.changes, origin=self.origin or 'capture',
+                    restored_from=self.restored_from, notes=self.notes or '',
                     captured_at=self.captured_at.strftime('%Y-%m-%d %H:%M'))
 
 
@@ -162,8 +184,10 @@ class RollbackEvent(db.Model):
     project_id         = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=False)
     from_version_num   = db.Column(db.Integer)           # latest version before rollback
     to_version_num     = db.Column(db.Integer)           # version restored
-    new_version_num    = db.Column(db.Integer)           # version recorded for the restore
-    safety_backup_path = db.Column(db.String(500), default='')
+    new_version_num    = db.Column(db.Integer)           # legacy (older builds recorded a new version)
+    safety_backup_path = db.Column(db.String(500), default='')   # legacy
+    restored_path      = db.Column(db.String(500), default='')   # the new, uniquely named copy
+    restored_hash      = db.Column(db.String(64),  default='')   # SHA-256 of that copy
     status             = db.Column(db.String(12),  default='success')   # success | failed
     message            = db.Column(db.Text,        default='')
     created_at         = db.Column(db.DateTime,    default=datetime.utcnow)
@@ -191,6 +215,8 @@ class AppSettings(db.Model):
     watcher_active           = db.Column(db.Boolean,     default=False)
     notifications_enabled    = db.Column(db.Boolean,     default=True)
     auto_backup              = db.Column(db.Boolean,     default=True)
+    # Quality scoring / prediction are outside the agreed specification: hidden unless enabled.
+    show_experimental        = db.Column(db.Boolean,     default=False)
     score_weight_tempo       = db.Column(db.Float, default=20.0)
     score_weight_channels    = db.Column(db.Float, default=25.0)
     score_weight_patterns    = db.Column(db.Float, default=25.0)

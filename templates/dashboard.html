@@ -29,13 +29,15 @@
       <div class="stat-label">Total Versions</div>
     </div>
   </div>
+  {% if show_experimental %}
   <div class="stat-card">
     <div class="stat-icon green"><i data-lucide="bar-chart-2"></i></div>
     <div class="stat-info">
       <div class="stat-value">{{ avg_score }}</div>
-      <div class="stat-label">Avg Quality Score</div>
+      <div class="stat-label">Avg Quality Score (experimental)</div>
     </div>
   </div>
+  {% endif %}
   <div class="stat-card">
     <div class="stat-icon purple"><i data-lucide="activity"></i></div>
     <div class="stat-info">
@@ -73,22 +75,18 @@
               {% endif %}
             </div>
           </div>
+          {% if show_experimental %}
           <div class="project-card-score {{ proj.score_class }}">
-            {% if proj.latest_score > 0 %}
-              {{ proj.latest_score|round(1) }}
-            {% else %}
-              —
-            {% endif %}
+            {% if proj.latest_score > 0 %}{{ proj.latest_score|round(1) }}{% else %}—{% endif %}
           </div>
+          {% endif %}
         </div>
 
-        <!-- Score bar -->
+        {% if show_experimental %}
         <div class="score-bar-wrap">
-          <div
-            class="score-bar-fill {{ proj.score_class }}"
-            data-score="{{ proj.latest_score }}"
-          ></div>
+          <div class="score-bar-fill {{ proj.score_class }}" data-score="{{ proj.latest_score }}"></div>
         </div>
+        {% endif %}
 
         <div class="flex items-center justify-between">
           <div class="project-card-stats">
@@ -98,16 +96,17 @@
             </div>
             {% if proj.latest_version %}
               <div class="project-card-stat">
-                <span class="pcs-value">{{ proj.latest_version.tempo|round(0)|int }}</span>
+                <span class="pcs-value">{% if proj.latest_version.tempo is not none %}{{ proj.latest_version.tempo|round(0)|int }}{% else %}<span class="na">n/a</span>{% endif %}</span>
                 <span class="pcs-label">BPM</span>
               </div>
               <div class="project-card-stat">
-                <span class="pcs-value">{{ proj.latest_version.channel_count }}</span>
+                <span class="pcs-value">{% if proj.latest_version.channel_count is not none %}{{ proj.latest_version.channel_count }}{% else %}<span class="na">n/a</span>{% endif %}</span>
                 <span class="pcs-label">channels</span>
               </div>
             {% endif %}
           </div>
 
+          {% if show_experimental %}
           <div class="trend-badge {{ proj.score_trend }}">
             {% if proj.score_trend == 'up' %}
               <i data-lucide="trending-up"></i> Improving
@@ -117,6 +116,7 @@
               <i data-lucide="minus"></i> Stable
             {% endif %}
           </div>
+          {% endif %}
         </div>
 
         {% if proj.description %}

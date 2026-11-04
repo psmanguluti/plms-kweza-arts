@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Compare · {{ project.name }}{% endblock %}
+{% block page_title %}Compare versions{% endblock %}
+{% block page_sub %}<a href="{{ url_for('project_detail', project_id=project.id) }}" style="color:var(--gold)">{{ project.name }}</a> &nbsp;·&nbsp; pick any two versions and see exactly what changed{% endblock %}
+
+{% block content %}
+{% if versions|length < 2 %}
+<div class="card"><div class="card-body"><div class="empty-state" style="padding:40px 0">
+  <p>A project needs at least two versions before they can be compared.</p></div></div></div>
+{% else %}
+<div class="card mb-6" id="compare-panel" data-project-id="{{ project.id }}" data-auto="1">
+  <div class="card-header"><h3>Choose two versions</h3></div>
+  <div class="card-body">
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+      <div><label class="fl">From (base)</label>
+        <select id="cmp-a" class="fi">
+          {% for v in versions %}<option value="{{ v.version_num }}" {% if v.version_num|string == default_a|string %}selected{% endif %}>v{{ v.version_num }} · {{ v.captured_at.strftime('%d %b %H:%M') }}{% if not v.available %} · unavailable{% endif %}</option>{% endfor %}
+        </select></div>
+      <div><label class="fl">To (target)</label>
+        <select id="cmp-b" class="fi">
+          {% for v in versions %}<option value="{{ v.version_num }}" {% if v.version_num|string == default_b|string %}selected{% endif %}>v{{ v.version_num }} · {{ v.captured_at.strftime('%d %b %H:%M') }}{% if not v.available %} · unavailable{% endif %}</option>{% endfor %}
+        </select></div>
+      <button type="button" class="btn btn-primary btn-sm" id="cmp-run"><i data-lucide="git-compare"></i> Compare</button>
+    </div>
+    <p class="text-xs text-muted" style="margin:10px 0 0">Comparing only reads the saved copies. It never changes either version.</p>
+    <div id="cmp-result" style="margin-top:6px"></div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

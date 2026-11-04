@@ -125,34 +125,51 @@ class ScoringEngine:
 
 
 # ── Change detection / comparison ──────────────────────────────
+def _fmt(x):
+    return f'{x:g}' if isinstance(x, (int, float)) else str(x)
+
+
 class ChangeEngine:
+    """Describes what changed between two versions. It never judges quality.
+
+    A property that is None is *unavailable* (file could not be read). Unavailable values
+    are never compared as numbers: the comparison says so instead of inventing a change.
+    """
     TRACKED = {
         'tempo':            {'label': 'Tempo',              'unit': 'BPM'},
-        'channel_count':    {'label': 'Channels',           'unit': 'tracks'},
+        'channel_count':    {'label': 'Channels',           'unit': 'channels'},
         'pattern_count':    {'label': 'Patterns',           'unit': 'patterns'},
         'sample_count':     {'label': 'Samples',            'unit': 'samples'},
         'playlist_items':   {'label': 'Playlist clips',     'unit': 'clips',  'arr': True},
         'tracks_used':      {'label': 'Playlist tracks',    'unit': 'tracks', 'arr': True},
         'arrangement_bars': {'label': 'Arrangement length', 'unit': 'bars',   'arr': True},
-        'complexity':       {'label': 'Structural complexity', 'unit': 'pts', 'arr': True},
     }
 
     @staticmethod
-    def _with_derived(d: dict) -> dict:
-        d = dict(d)
-        d['complexity'] = structural_complexity(d)
-        return d
+    def _readable(d: dict) -> bool:
+        return d.get('available', True) is not False
+
+    @staticmethod
+    def _plugin_diff(a: dict, b: dict) -> dict:
+        pa, pb = a.get('plugins'), b.get('plugins')
+        if pa is None or pb is None:
+            return dict(available=False, added=[], removed=[], kept=0)
+        sa, sb = set(pa), set(pb)
+        return dict(available=True, added=sorted(sb - sa, key=str.lower),
+                    removed=sorted(sa - sb, key=str.lower), kept=len(sa & sb))
 
     def compute(self, v1: dict, v2: dict) -> dict:
-        """Changed metrics only (stored with each version)."""
-        a, b = self._with_derived(v1), self._with_derived(v2)
-        both_arr = bool(a.get('has_arrangement') and b.get('has_arrangement'))
+        """Changed properties only (stored with each version as changes_json)."""
+        if not (self._readable(v1) and self._readable(v2)):
+            return dict(unavailable=True, total=0)
         changes = {}
         for key, meta in self.TRACKED.items():
-            if meta.get('arr') and not both_arr:
+            old, new = v1.get(key), v2.get(key)
+            if old is None or new is None:
                 continue
-            old, new = float(a.get(key, 0) or 0), float(b.get(key, 0) or 0)
-            delta = new - old
+            if meta.get('arr') and not (v1.get('has_arrangement') and v2.get('has_arrangement')):
+                continue                         # older capture without playlist data
+            delta = float(new) - float(old)
             if abs(delta) < 0.01:
                 continue
             changes[key] = dict(
@@ -160,29 +177,42 @@ class ChangeEngine:
                 before=round(old, 2), after=round(new, 2), delta=round(delta, 2),
                 percent=round((delta / old * 100) if old else 0.0, 1),
                 direction='increased' if delta > 0 else 'decreased')
-        changes['total'] = len(changes)
+        pd = self._plugin_diff(v1, v2)
+        total = len(changes) + len(pd['added']) + len(pd['removed'])
+        changes['plugins'] = dict(added=pd['added'], removed=pd['removed'], available=pd['available'])
+        changes['total'] = total
         return changes
 
-    def compare(self, a: dict, b: dict) -> dict:
-        """
-        Full comparison between ANY two versions (FR-06..FR-10).
-        a = earlier/base version dict, b = later/target version dict.
-        """
-        A, B = self._with_derived(a), self._with_derived(b)
-        both_arr = bool(a.get('has_arrangement') and b.get('has_arrangement'))
+    def compare(self, a: dict, b: dict, include_score: bool = False) -> dict:
+        """Full comparison between ANY two versions. a = base, b = target. Pure: neither
+        version is modified, and comparing a version with an identical one shows no change."""
+        ra, rb = self._readable(a), self._readable(b)
+        both_ok = ra and rb
         metrics = []
         for key, meta in self.TRACKED.items():
-            avail = (not meta.get('arr')) or both_arr
-            old, new = float(A.get(key, 0) or 0), float(B.get(key, 0) or 0)
-            delta = new - old
+            old, new = a.get(key), b.get(key)
+            avail = both_ok and old is not None and new is not None
+            if meta.get('arr') and not (a.get('has_arrangement') and b.get('has_arrangement')):
+                avail = False                    # older capture without playlist data
+            if avail:
+                delta = float(new) - float(old)
+                direction = ('unchanged' if abs(delta) < 0.01 else
+                             'increased' if delta > 0 else 'decreased')
+            else:
+                delta, direction = None, 'unavailable'
             metrics.append(dict(
                 key=key, label=meta['label'], unit=meta['unit'], available=avail,
-                before=round(old, 2), after=round(new, 2),
+                before=None if old is None or not ra else round(old, 2),
+                after=None if new is None or not rb else round(new, 2),
                 delta=round(delta, 2) if avail else None,
-                percent=round((delta / old * 100) if old else 0.0, 1) if avail else None,
-                direction=('unchanged' if abs(delta) < 0.01 else
-                           'increased' if delta > 0 else 'decreased') if avail else 'n/a'))
+                percent=(round((delta / old * 100) if old else 0.0, 1) if avail else None),
+                direction=direction))
 
+        plugins = self._plugin_diff(a, b) if both_ok else dict(available=False, added=[], removed=[], kept=0)
+        plugins['before'] = a.get('plugins') if ra else None
+        plugins['after'] = b.get('plugins') if rb else None
+
+        both_arr = bool(both_ok and a.get('has_arrangement') and b.get('has_arrangement'))
         arrangement = dict(available=both_arr, patterns_added=[], patterns_removed=[],
                            patterns_changed=[], tracks_added=[], tracks_removed=[],
                            tracks_changed=[])
@@ -202,25 +232,115 @@ class ChangeEngine:
             diff(pa, pb, 'patterns_added', 'patterns_removed', 'patterns_changed')
             diff(ta, tb, 'tracks_added', 'tracks_removed', 'tracks_changed')
 
-        sa, sb = float(a.get('quality_score', 0) or 0), float(b.get('quality_score', 0) or 0)
-        changed = [m for m in metrics if m['available'] and m['direction'] not in ('unchanged', 'n/a')]
-        return dict(
-            a=dict(version_num=a.get('version_num'), quality_score=sa),
-            b=dict(version_num=b.get('version_num'), quality_score=sb),
-            score_delta=round(sb - sa, 1),
-            metrics=metrics, arrangement=arrangement,
-            changed_count=len(changed),
-            summary=self._summary(a, b, sb - sa, changed))
+        changed = [m for m in metrics if m['available'] and m['direction'] in ('increased', 'decreased')]
+        n_plugin = len(plugins['added']) + len(plugins['removed'])
+        n_arr = sum(len(arrangement[k]) for k in arrangement if k != 'available')
+        out = dict(
+            a=dict(version_num=a.get('version_num'), available=ra),
+            b=dict(version_num=b.get('version_num'), available=rb),
+            metrics=metrics, plugins=plugins, arrangement=arrangement,
+            changed_count=len(changed) + n_plugin,
+            identical=bool(both_ok and not changed and not n_plugin and not n_arr
+                           and all(m['available'] for m in metrics[:3])),
+            summary=self._summary(a, b, ra, rb, changed, plugins))
+        if include_score:
+            sa, sb = a.get('quality_score'), b.get('quality_score')
+            out['score'] = dict(a=sa, b=sb, delta=round(sb - sa, 1) if sa is not None and sb is not None else None)
+        return out
 
     @staticmethod
-    def _summary(a, b, sd, changed):
-        if not changed and abs(sd) < 0.05:
-            return f"v{b.get('version_num')} is identical to v{a.get('version_num')} on every tracked metric."
-        parts = [f"{m['label'].lower()} {m['direction']} ({m['before']:g} -> {m['after']:g})"
-                 for m in changed[:3]]
-        trend = 'up' if sd > 0.05 else 'down' if sd < -0.05 else 'unchanged'
-        return (f"v{a.get('version_num')} -> v{b.get('version_num')}: score {trend} "
-                f"({sd:+.1f}); " + '; '.join(parts) + '.')
+    def _phrase(m) -> str:
+        key, unit = m['key'], m['unit']
+        d, up = abs(m['delta']), m['delta'] > 0
+        if key == 'tempo':
+            return f"tempo changed from {_fmt(m['before'])} to {_fmt(m['after'])} BPM"
+        if key == 'arrangement_bars':
+            return f"the arrangement is {_fmt(d)} bars {'longer' if up else 'shorter'}"
+        noun = unit[:-1] if d == 1 and unit.endswith('s') else unit
+        return f"{_fmt(d)} {noun} {'added' if up else 'removed'} ({_fmt(m['before'])} to {_fmt(m['after'])})"
+
+    def _summary(self, a, b, ra, rb, changed, plugins) -> str:
+        va, vb = a.get('version_num'), b.get('version_num')
+        if not ra or not rb:
+            bad = ' and '.join(f'v{v}' for v, ok in ((va, ra), (vb, rb)) if not ok)
+            return (f'Details are unavailable for {bad} (the file could not be read), so v{va} and v{vb} '
+                    f'cannot be compared. Both are still saved and can be restored.')
+        parts = [self._phrase(m) for m in changed]
+        if plugins['available']:
+            if plugins['added']:
+                parts.append('plugins added: ' + ', '.join(plugins['added']))
+            if plugins['removed']:
+                parts.append('plugins removed: ' + ', '.join(plugins['removed']))
+        if not parts:
+            return f'v{vb} shows no differences from v{va} in the properties PLMS reads.'
+        s = '; '.join(parts)
+        return f'From v{va} to v{vb}: ' + s[0].lower() + s[1:] + '.'
+
+
+# ── Progress indicators (R11) ──────────────────────────────────
+def progress_indicators(versions: list) -> list:
+    """Four transparent indicators for the latest version. `versions` = list of
+    Version.metrics() dicts, oldest first. Each indicator carries its formula and the
+    actual numbers used, so the user can check it by hand. None value = unavailable."""
+    if len(versions) < 2:
+        return []
+    first, prev, cur = versions[0], versions[-2], versions[-1]
+    vf, vp, vc = first['version_num'], prev['version_num'], cur['version_num']
+    ok = lambda d: d.get('available', True) is not False
+
+    def pair(x, y, key):
+        if not (ok(x) and ok(y)): return None
+        a, b = x.get(key), y.get(key)
+        return (a, b) if a is not None and b is not None else None
+
+    out = []
+
+    # 1. changes since previous version
+    cmp_ = ChangeEngine().compare(prev, cur)
+    if cmp_['a']['available'] and cmp_['b']['available']:
+        avail = [m for m in cmp_['metrics'] if m['available']]
+        changed = [m['label'] for m in avail if m['direction'] in ('increased', 'decreased')]
+        if cmp_['plugins']['added'] or cmp_['plugins']['removed']:
+            changed.append('Plugins')
+        total = len(avail) + (1 if cmp_['plugins']['available'] else 0)
+        out.append(dict(key='changes', label=f'Changes since v{vp}', value=f'{len(changed)} of {total}',
+                        formula='number of properties whose value differs between the two versions',
+                        workings=('Changed: ' + ', '.join(changed)) if changed else 'Nothing changed.'))
+    else:
+        out.append(dict(key='changes', label=f'Changes since v{vp}', value=None,
+                        formula='number of properties whose value differs between the two versions',
+                        workings='unavailable: one of the two files could not be read'))
+
+    # 2. playlist growth vs previous
+    p = pair(prev, cur, 'playlist_items')
+    f2 = '(clips now − clips before) ÷ clips before × 100'
+    if p and p[0]:
+        out.append(dict(key='playlist_growth', label=f'Playlist growth since v{vp}',
+                        value=f'{(p[1]-p[0])/p[0]*100:+.1f}%', formula=f2,
+                        workings=f'({p[1]} − {p[0]}) ÷ {p[0]} × 100'))
+    else:
+        why = 'unavailable' if not p else 'the earlier version had no playlist clips'
+        out.append(dict(key='playlist_growth', label=f'Playlist growth since v{vp}', value=None,
+                        formula=f2, workings=why))
+
+    # 3. arrangement length gained since first version
+    p = pair(first, cur, 'arrangement_bars')
+    f3 = 'bars now − bars in the first version'
+    out.append(dict(key='length_gain', label=f'Arrangement length since v{vf}',
+                    value=f'{p[1]-p[0]:+g} bars' if p else None, formula=f3,
+                    workings=f'{_fmt(p[1])} − {_fmt(p[0])}' if p else 'unavailable'))
+
+    # 4. channel growth since first version
+    p = pair(first, cur, 'channel_count')
+    f4 = '(channels now − channels in first version) ÷ channels in first version × 100'
+    if p and p[0]:
+        out.append(dict(key='channel_growth', label=f'Channel growth since v{vf}',
+                        value=f'{(p[1]-p[0])/p[0]*100:+.1f}%', formula=f4,
+                        workings=f'({p[1]} − {p[0]}) ÷ {p[0]} × 100'))
+    else:
+        out.append(dict(key='channel_growth', label=f'Channel growth since v{vf}', value=None,
+                        formula=f4, workings='unavailable' if not p else 'the first version had no channels'))
+    return out
 
 
 # ── Prediction ─────────────────────────────────────────────────
@@ -245,6 +365,8 @@ class PredictionEngine:
         return 'stable'
 
     def predict(self, versions: list, metric: str) -> dict:
+        versions = [v for v in versions if getattr(v, 'available', True)
+                    and getattr(v, metric, None) is not None]
         n = len(versions)
         if n < self.MIN:
             return dict(available=False, message=f'Need at least {self.MIN} versions.')
@@ -289,6 +411,8 @@ class PatternAnalyzer:
                ('pattern_count', 'Patterns'), ('quality_score', 'Score')]
 
     def summarise(self, versions: list) -> dict:
+        versions = [v for v in versions if getattr(v, 'available', True)
+                    and getattr(v, 'quality_score', None) is not None]
         n = len(versions)
         if n < self.MIN:
             return dict(available=False, insights=[],

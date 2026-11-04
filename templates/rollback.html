@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Rollback · {{ project.name }}{% endblock %}
+{% block page_title %}Rollback{% endblock %}
+{% block page_sub %}<a href="{{ url_for('project_detail', project_id=project.id) }}" style="color:var(--gold)">{{ project.name }}</a> &nbsp;·&nbsp; restore an earlier version as a new file{% endblock %}
+
+{% block content %}
+<div class="card mb-6">
+  <div class="card-header"><h3>How rollback works</h3></div>
+  <div class="card-body" style="font-size:.86rem;color:var(--text-2);line-height:1.7">
+    Restoring never touches your current project file. PLMS writes the chosen version to a <b style="color:var(--text-1)">new, uniquely named copy</b>
+    (<span class="mono">SongName_restored_v2_20261103.flp</span>), checks it against the stored SHA-256, and leaves every saved version unchanged.
+    You can then open the copy in FL Studio. {% if restore_dir %}New copies are saved in <span class="mono" style="color:var(--text-1)">{{ restore_dir }}</span>.{% endif %}
+  </div>
+</div>
+
+<div id="rb-result" style="margin-bottom:18px"></div>
+
+<div class="card mb-6">
+  <div class="card-header"><h3>Versions</h3></div>
+  <div class="card-body" style="padding-top:8px;padding-bottom:8px">
+    {% if project.is_demo %}<p class="text-muted">Demo projects have no real files to restore.</p>{% endif %}
+    {% for r in rows %}
+    <div class="rb-row {{ 'sel' if selected == r.v.version_num }}">
+      <b style="width:42px">v{{ r.v.version_num }}</b>
+      <span class="mono" style="color:var(--text-3);width:120px">{{ r.v.captured_at.strftime('%d %b %Y %H:%M') }}</span>
+      <span style="flex:1;min-width:220px;font-size:.82rem;color:var(--text-2)">
+        {% if r.ok %}Will be saved as <b class="mono" style="color:var(--text-1)">{{ r.name }}</b>{% else %}{{ r.why }}{% endif %}
+      </span>
+      {% if r.ok %}
+      <button class="btn btn-primary btn-sm rb-restore" data-project-id="{{ project.id }}" data-version-num="{{ r.v.version_num }}">
+        <i data-lucide="rotate-ccw"></i> Restore as new copy</button>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header"><h3>Restore history</h3></div>
+  <div class="card-body" style="font-size:.82rem">
+    {% for h in history %}
+    <div style="display:flex;gap:12px;padding:6px 0;border-bottom:1px solid var(--border);flex-wrap:wrap">
+      <span class="mono" style="color:var(--text-3)">{{ h.created_at.strftime('%d %b %Y %H:%M') }}</span>
+      <span>v{{ h.to_version_num }}{% if h.restored_path %} → <b class="mono">{{ h.restored_path|basename }}</b>{% endif %}</span>
+      <span style="margin-left:auto;color:{{ 'var(--danger)' if h.status == 'failed' else 'var(--success)' }}">{{ h.status }}</span>
+      {% if h.status == 'failed' %}<div style="width:100%;font-size:.75rem;color:var(--text-3)">{{ h.message }}</div>{% endif %}
+    </div>
+    {% else %}<p class="text-muted">Nothing restored yet.</p>{% endfor %}
+  </div>
+</div>
+{% endblock %}

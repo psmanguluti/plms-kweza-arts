@@ -76,8 +76,8 @@ def test_compare_detects_arrangement_changes():
     a = v()
     b = v(version_num=2, channel_count=7, playlist_items=14, quality_score=61.5,
           arrangement=dict(patterns={'1': 4, '3': 10}, tracks={'1': 5, '2': 5, '3': 4}))
-    r = ChangeEngine().compare(a, b)
-    assert r['score_delta'] == 11.5
+    r = ChangeEngine().compare(a, b, include_score=True)
+    assert r['score']['delta'] == 11.5
     ch = next(m for m in r['metrics'] if m['key'] == 'channel_count')
     assert ch['delta'] == 3 and ch['direction'] == 'increased'
     arr = r['arrangement']
@@ -88,7 +88,7 @@ def test_compare_detects_arrangement_changes():
 
 def test_compare_identical_versions_is_unchanged():
     r = ChangeEngine().compare(v(), v(version_num=2))
-    assert r['changed_count'] == 0 and 'identical' in r['summary']
+    assert r['changed_count'] == 0 and r['identical'] and 'no differences' in r['summary']
 
 
 def test_compare_skips_arrangement_when_legacy_version():
@@ -152,3 +152,78 @@ def test_patterns_detect_plateau_and_regression():
 
 def test_patterns_unavailable_below_three():
     assert PatternAnalyzer().summarise(versions([1, 2]))['available'] is False
+
+
+# ---- R9: unavailable, never invented ------------------------------------
+PROPS = ('tempo', 'channel_count', 'pattern_count', 'sample_count', 'playlist_items',
+         'tracks_used', 'arrangement_bars', 'plugins')
+
+
+@pytest.mark.parametrize('blob', [b'', b'garbage', b'FLhd' + b'\x00' * 40,
+                                  sample('sample_tiny.flp')[:200], sample('sample_small.flp')[:-5]])
+def test_unreadable_file_reports_unavailable_not_defaults(blob):
+    d = parse_flp_bytes(blob)
+    assert d['parse_ok'] is False and d['parse_error']
+    assert all(d[k] is None for k in PROPS)            # no 120 BPM, no 0 channels
+
+
+def test_readable_file_is_flagged_ok():
+    assert parse_flp_bytes(sample('sample_small.flp'))['parse_ok'] is True
+
+
+# ---- R8: plugins ---------------------------------------------------------
+def test_parser_extracts_plugins():
+    assert parse_flp_bytes(sample('sample_small.flp'))['plugins'] == [
+        'FL Keys', 'FLEX', 'Fruity Compressor', 'Fruity Limiter', 'Fruity Reeverb 2', 'Purity']
+    assert parse_flp_bytes(sample('sample_large.flp'))['plugins'] == [
+        'Fruity Parametric EQ 2', 'GMS', 'Purity', 'Sawer']
+    assert parse_flp_bytes(sample('sample_tiny.flp'))['plugins'] == []
+
+
+# ---- R10: plugins compared as sets; unavailable never compared -----------
+def test_compare_plugins_as_sets():
+    a = v(plugins=['GMS', 'Purity']); b = v(version_num=2, plugins=['Purity', 'Serum', 'Sawer'])
+    r = ChangeEngine().compare(a, b)
+    assert r['plugins']['added'] == ['Sawer', 'Serum'] and r['plugins']['removed'] == ['GMS']
+    assert 'plugins added: Sawer, Serum' in r['summary'] and not r['identical']
+    c = ChangeEngine().compute(a, b)
+    assert c['plugins']['added'] == ['Sawer', 'Serum'] and c['total'] >= 3
+
+
+def test_compare_with_unavailable_version_invents_no_changes():
+    bad = dict(version_num=2, available=False, tempo=None, channel_count=None, pattern_count=None,
+               sample_count=None, playlist_items=None, tracks_used=None, arrangement_bars=None,
+               plugins=None, quality_score=None, has_arrangement=False, arrangement=None)
+    r = ChangeEngine().compare(v(), bad)
+    assert r['changed_count'] == 0 and not r['identical']
+    assert all(m['direction'] == 'unavailable' and m['after'] is None for m in r['metrics'])
+    assert 'unavailable' in r['summary'] and 'v2' in r['summary']
+    assert ChangeEngine().compute(v(), bad) == dict(unavailable=True, total=0)
+
+
+def test_compare_does_not_modify_inputs():
+    import copy
+    a, b = v(plugins=['A']), v(version_num=2, channel_count=9, plugins=['B'])
+    a0, b0 = copy.deepcopy(a), copy.deepcopy(b)
+    ChangeEngine().compare(a, b)
+    assert a == a0 and b == b0
+
+
+# ---- R11: progress indicators with visible formulas ----------------------
+def test_progress_indicators_show_formula_and_workings():
+    from engines import progress_indicators
+    vs = [v(version_num=1, channel_count=10, playlist_items=40, arrangement_bars=16.0),
+          v(version_num=2, channel_count=12, playlist_items=46, arrangement_bars=24.0, plugins=['X'])]
+    ind = {i['key']: i for i in progress_indicators(vs)}
+    assert set(ind) == {'changes', 'playlist_growth', 'length_gain', 'channel_growth'}
+    assert ind['playlist_growth']['value'] == '+15.0%' and ind['playlist_growth']['workings'] == '(46 − 40) ÷ 40 × 100'
+    assert ind['length_gain']['value'] == '+8 bars'
+    assert ind['channel_growth']['value'] == '+20.0%'
+    assert all(i['formula'] for i in ind.values())
+
+
+def test_progress_indicator_is_unavailable_when_data_missing():
+    from engines import progress_indicators
+    bad = v(version_num=2, available=False, playlist_items=None, arrangement_bars=None, channel_count=None)
+    ind = {i['key']: i for i in progress_indicators([v(), bad])}
+    assert all(i['value'] is None for i in ind.values())

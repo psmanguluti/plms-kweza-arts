@@ -98,6 +98,29 @@
     </div>
   </div>
 
+  <!-- ── Experimental features (outside the agreed specification) ── -->
+  <div class="settings-section">
+    <div class="settings-section-header">
+      <div class="sh-icon"><i data-lucide="flask-conical"></i></div>
+      <div class="sh-text">
+        <h4>Experimental: quality score &amp; prediction</h4>
+        <p>Off by default. PLMS describes what changed; it does not judge a track.</p>
+      </div>
+    </div>
+    <div class="settings-section-body">
+      <form method="POST" action="{{ url_for('settings') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="experimental">
+        <label style="display:flex;gap:8px;align-items:center;font-size:.85rem;color:var(--text-2);margin-bottom:14px">
+          <input type="checkbox" name="show_experimental" value="1" {{ 'checked' if s.show_experimental }}>
+          Show quality score, trend labels and predictions
+        </label>
+        <button type="submit" class="btn btn-primary btn-sm"><i data-lucide="save"></i> Save</button>
+      </form>
+    </div>
+  </div>
+
+  {% if s.show_experimental %}
   <!-- ── Scoring Weights ───────────────────────────────────────── -->
   <div class="settings-section">
     <div class="settings-section-header">
@@ -168,6 +191,7 @@
       </form>
     </div>
   </div>
+  {% endif %}
 
   <!-- ── Account ──────────────────────────────────────────────── -->
   <div class="settings-section">

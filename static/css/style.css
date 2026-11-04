@@ -210,3 +210,20 @@ input,textarea,select{font-family:inherit;font-size:inherit;background:none;bord
 @media(max-width:1100px){.stat-grid{grid-template-columns:repeat(2,1fr)}.chart-grid{grid-template-columns:1fr}.settings-grid{grid-template-columns:1fr}.prediction-grid{grid-template-columns:1fr}}
 @media(max-width:780px){.auth-page{grid-template-columns:1fr}.auth-visual{display:none}.auth-form-panel{padding:40px 28px}.sidebar{transform:translateX(-100%)}.sidebar.open{transform:translateX(0)}.main-content{margin-left:0}.topbar{padding:0 18px}.page-body{padding:18px}.stat-grid{grid-template-columns:1fr 1fr}.projects-grid{grid-template-columns:1fr}}
 @media(max-width:500px){.stat-grid{grid-template-columns:1fr}.modal{margin:16px;padding:24px}}
+
+/* ── Compare / rollback screens, unavailable values ───────────── */
+.na{color:var(--text-3);font-style:italic;font-size:.85em;font-weight:400}
+.fl{display:block;font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);margin-bottom:4px}
+.fi{height:34px;padding:0 10px;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-1);font-size:.82rem}
+.table-scroll{overflow-x:auto}
+.cmp-table{width:100%;border-collapse:collapse;font-size:.82rem}
+.cmp-table th,.cmp-table td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+.cmp-table th{font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3)}
+.cmp-increased td:last-child{color:var(--success)}.cmp-decreased td:last-child{color:var(--danger)}
+.cmp-unchanged{opacity:.55}.cmp-score td{font-weight:600}
+.cmp-arr{font-size:.82rem;color:var(--text-2);margin-top:12px;display:grid;gap:4px}
+.rb-ok{background:var(--success-dim);border:1px solid rgba(34,197,94,.25);color:var(--text-1);padding:14px 16px;border-radius:var(--radius-md)}
+.rb-fail{background:var(--danger-dim);border:1px solid rgba(244,63,94,.25);color:var(--text-1);padding:14px 16px;border-radius:var(--radius-md)}
+.rb-line{font-size:.8rem;color:var(--text-2);margin-top:4px;word-break:break-all}
+.rb-row{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--border)}
+.rb-row.sel{background:var(--gold-dim);margin:0 -24px;padding-left:24px;padding-right:24px}

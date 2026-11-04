@@ -1,3 +1,25 @@
+# PLMS v1.1 — fixes from "PLMS Prototype v1.0 – Review Feedback"
+
+| Review item | Change | Files |
+|---|---|---|
+| **Issue 1 (R6/R7)** Rollback overwrote the current file | Rollback now writes a **new, uniquely named copy** (`Song_restored_v2_YYYYMMDD.flp`), created exclusively (never overwrites), checked against the stored SHA-256, logged in `RollbackEvent` (`restored_path`, `restored_hash`). No version is added or changed. The safety-backup step is gone because nothing is overwritten. New Rollback screen shows the copy's name. | `app.py` (`api_rollback`, `rollback_page`), `models.py`, `templates/rollback.html`, `static/js/app.js` |
+| **Issue 2 (R9)** Invented values (120 BPM, 0 channels) | Parser returns `parse_ok=False` and `None` for every property on unreadable or truncated files. Stored as NULL, shown as "unavailable" in the timeline, comparison, charts (gaps), CSV and PDF. Comparisons say details are unavailable. | `flp_parser.py`, `models.py`, `app.py`, `engines.py`, templates, `app.js` |
+| **Issue 3 (R2)** No finished-saving check | `wait_until_stable()` polls size + modified time until unchanged for 3 readings. Replaced the 0.6 s sleep and 3 s debounce. Late events re-check the file; an already-captured identical file is not re-captured. Captures also re-read if the file changes mid-read. | `watcher.py`, `app.py` (`_read_stable`) |
+| **Issue 4 (R8/R10)** Plugins | Extracted (instrument and effect names), stored per version (`plugins_json`), compared as sets in the change report, comparison screen, exports. | `flp_parser.py`, `models.py`, `engines.py` |
+| **Issue 5 (R11)** Progress indicators | Four indicators with formula and worked numbers: changes since previous version, playlist growth, arrangement length gained, channel growth. | `engines.py` (`progress_indicators`), `project.html` |
+| **Issue 6 (R12)** Screens | Dedicated Compare screen (`/project/<id>/compare`) and Rollback screen (`/project/<id>/rollback`). | `app.py`, `compare.html`, `rollback.html` |
+| **Issue 7 (R3)** Duplicate detection | Behaviour unchanged (latest version only); documented, to be agreed. | `README.md` |
+| **Issue 8** Debug on | Off unless `PLMS_DEBUG=1`. | `app.py` |
+| **Issue 9** Path validation | Path must end in `.flp` and exist. | `app.py` |
+| **Section 6** Scoring and prediction | Kept, but **hidden by default** behind Settings → Experimental. Not shown in the dashboard, project page, comparison, notifications, CSV or PDF unless switched on. | `app.py`, templates |
+| User guide | README corrected: no pyflp, no default fallback values, rollback described. | `README.md` |
+
+Also fixed: chart data was HTML-escaped inside its `<script>` tag, so charts never drew. Complexity index removed from change reports (not in the spec).
+
+Tests: 98 pass (`tests/test_review_fixes.py` covers each item above).
+
+---
+
 # PLMS code changes (items 1–17)
 
 ## Batch 1 — functional gaps
